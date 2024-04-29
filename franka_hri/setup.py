@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = 'hri_image_processing'
+package_name = 'franka_hri'
 
 setup(
     name=package_name,
