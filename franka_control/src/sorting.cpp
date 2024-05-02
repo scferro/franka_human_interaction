@@ -25,11 +25,11 @@
 
 using namespace std::chrono_literals;
 
-class Plates : public rclcpp::Node
+class Sorting : public rclcpp::Node
 {
 public:
-  Plates()
-  : Node("plates")
+  Sorting()
+  : Node("sorting")
   {
     // Parameters and default values
     declare_parameter("rate", 200.);
@@ -40,13 +40,13 @@ public:
     // Servers
     grab_plate_srv = create_service<std_srvs::srv::Empty>(
       "grab_plate",
-      std::bind(&Plates::grab_plate_callback, this, std::placeholders::_1, std::placeholders::_2));
+      std::bind(&Sorting::grab_plate_callback, this, std::placeholders::_1, std::placeholders::_2));
 
     // Main timer
     int cycle_time = 1000.0 / loop_rate;
     main_timer = this->create_wall_timer(
       std::chrono::milliseconds(cycle_time),
-      std::bind(&Plates::timer_callback, this));
+      std::bind(&Sorting::timer_callback, this));
   }
 
 private:
@@ -64,6 +64,12 @@ private:
     int something = 0;
   }
 
+  /// \brief Scans the items in front of the robot with the camera 
+  void scan()
+  {
+    int something = 0;
+  }
+
   /// \brief Callback for the grab_plate server, moves robot
   void grab_plate_callback(
     std_srvs::srv::Empty::Request::SharedPtr,
@@ -76,7 +82,7 @@ private:
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
-  auto node = std::make_shared<Plates>();
+  auto node = std::make_shared<Sorting>();
   rclcpp::spin(node);
   rclcpp::shutdown();
   return 0;

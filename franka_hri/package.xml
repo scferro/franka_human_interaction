@@ -3,9 +3,9 @@
 <package format="3">
   <name>franka_hri</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>A package for managing human interactions </description>
   <maintainer email="stephencferro@gmail.com">scferro</maintainer>
-  <license>TODO: License declaration</license>
+  <license>MIT</license>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
