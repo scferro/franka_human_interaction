@@ -55,11 +55,31 @@ class Sorting(Node):
             'img_out',  
             10)
         
+        # Clients for robot motions
+        self.scan_pose_client = self.create_client(Empty, 'move_to_scan_pose')
+        while not self.scan_pose_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('service not available, waiting again...')
+        self.grab_client = self.create_client(Empty, 'grab_block')
+        while not self.grab_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('service not available, waiting again...')
+        self.left_wait_client = self.create_client(Empty, 'move_to_left_wait')
+        while not self.left_wait_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('service not available, waiting again...')
+        self.left_drop_client = self.create_client(Empty, 'drop_left')
+        while not self.left_drop_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('service not available, waiting again...')
+        self.right_wait_client = self.create_client(Empty, 'move_to_right_wait')
+        while not self.right_wait_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('service not available, waiting again...')
+        self.right_drop_client = self.create_client(Empty, 'drop_right')
+        while not self.right_drop_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('service not available, waiting again...')
+        
         # Create timer
         self.timer = self.create_timer(0.1, self.timer_callback)
 
         # Create testing service
-        self.scan_srv = self.create_service(Empty, 'scan', self.scan_srv_callback)
+        self.sort_srv = self.create_service(Empty, 'sort_blocks', self.sort_srv_callback)
 
         # Create TF broadcaster and buffer
         self.tf_broadcaster = TransformBroadcaster(self)
@@ -73,13 +93,29 @@ class Sorting(Node):
         # Store block poses in a list
         self.block_tfs = []
 
-    def timer_callback(self):
-        for tf in self.block_tfs:
-            # Send the transformation
-            self.tf_broadcaster.sendTransform(tf)
+    def sort_srv_callback(self, request, response):
+        # Move to the scan pose
+        self.future = self.scan_pose_client.call_async(request)
+        rclpy.spin_until_future_complete(self, self.future)
 
-    def scan_srv_callback(self, request, response):
+        # Scan for blocks
         self.scan()
+
+        # Grab block
+        self.future = self.grab_client.call_async(request)
+        rclpy.spin_until_future_complete(self, self.future)
+
+        # Randomly select left or right side
+        rand = 0 #np.random.rand
+        if rand < 0.5:
+            # Move to left side wait pose
+            self.future = self.left_wait_client.call_async(request)
+            rclpy.spin_until_future_complete(self, self.future)
+
+            # Drop block on left side
+            self.future = self.left_drop_client.call_async(request)
+            rclpy.spin_until_future_complete(self, self.future)
+
         return response
 
     def scan(self):
@@ -233,6 +269,11 @@ class Sorting(Node):
         except CvBridgeError as e:
             print(f"Error converting OpenCV image to ROS2 message: {e}")
             return None
+
+    def timer_callback(self):
+        for tf in self.block_tfs:
+            # Send the transformation
+            self.tf_broadcaster.sendTransform(tf)
 
     def make_static_transforms(self):
         t_cam = TransformStamped()

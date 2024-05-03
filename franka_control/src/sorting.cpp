@@ -20,6 +20,10 @@ public:
       "move_to_scan_pose",
       std::bind(&Sorting::move_to_scan, this, std::placeholders::_1, std::placeholders::_2));
 
+    grab_srv = create_service<std_srvs::srv::Empty>(
+      "grab_block",
+      std::bind(&Sorting::grab_block, this, std::placeholders::_1, std::placeholders::_2));
+
     left_wait_srv = create_service<std_srvs::srv::Empty>(
       "move_to_left_wait",
       std::bind(&Sorting::move_to_left_wait_pose, this, std::placeholders::_1, std::placeholders::_2));
@@ -51,6 +55,7 @@ public:
 
 private:
   double loop_rate;
+  rclcpp::Service<std_srvs::srv::Empty>::SharedPtr grab_srv;
   rclcpp::Service<std_srvs::srv::Empty>::SharedPtr scan_srv;
   rclcpp::Service<std_srvs::srv::Empty>::SharedPtr left_wait_srv;
   rclcpp::Service<std_srvs::srv::Empty>::SharedPtr left_drop_srv;
@@ -63,6 +68,39 @@ private:
   void timer_callback()
   {
     int something = 0;
+  }
+
+  void grab_block(
+    std_srvs::srv::Empty::Request::SharedPtr,
+    std_srvs::srv::Empty::Response::SharedPtr)
+  {
+    geometry_msgs::msg::Pose target_pose;
+    target_pose.position.x = 0.3;
+    target_pose.position.y = 0.0;
+    target_pose.position.z = 0.075;
+    target_pose.orientation.x = 1.0;
+    target_pose.orientation.y = 0.0;
+    target_pose.orientation.z = 0.0;
+    target_pose.orientation.w = 0.0;
+
+    move_group->setPoseTarget(target_pose);
+
+    // Set the planning time (in seconds)
+    move_group->setPlanningTime(5.0); 
+    move_group->setMaxVelocityScalingFactor(0.5);   
+    move_group->setMaxAccelerationScalingFactor(0.2); 
+
+    moveit::planning_interface::MoveGroupInterface::Plan plan;
+    bool success = (move_group->plan(plan) == moveit::planning_interface::MoveItErrorCode::SUCCESS);
+
+    if (success) {
+      move_group->execute(plan);
+      control_gripper(0.02); 
+      return true;
+    } else {
+      RCLCPP_INFO(this->get_logger(), "Planning failed RIP");
+      return false;
+    }
   }
 
   void move_to_scan(
@@ -82,17 +120,19 @@ private:
 
     // Set the planning time (in seconds)
     move_group->setPlanningTime(5.0); 
-    move_group->setMaxVelocityScalingFactor(0.8);   // Max speed (1.0 is full speed)
-    move_group->setMaxAccelerationScalingFactor(0.2); // Max acceleration
+    move_group->setMaxVelocityScalingFactor(0.8);   
+    move_group->setMaxAccelerationScalingFactor(0.2); 
 
     moveit::planning_interface::MoveGroupInterface::Plan plan;
     bool success = (move_group->plan(plan) == moveit::planning_interface::MoveItErrorCode::SUCCESS);
 
     if (success) {
       move_group->execute(plan);
-      control_gripper(0.00); 
+      control_gripper(0.04); 
+      return true;
     } else {
       RCLCPP_INFO(this->get_logger(), "Planning failed RIP");
+      return false;
     }
   }
 
@@ -113,16 +153,18 @@ private:
 
     // Set the planning time (in seconds)
     move_group->setPlanningTime(5.0); 
-    move_group->setMaxVelocityScalingFactor(0.8);   // Max speed (1.0 is full speed)
-    move_group->setMaxAccelerationScalingFactor(0.2); // Max acceleration
+    move_group->setMaxVelocityScalingFactor(0.8);   
+    move_group->setMaxAccelerationScalingFactor(0.2); 
 
     moveit::planning_interface::MoveGroupInterface::Plan plan;
     bool success = (move_group->plan(plan) == moveit::core::MoveItErrorCode::SUCCESS);
 
     if (success) {
       move_group->execute(plan);
+      return true;
     } else {
       RCLCPP_INFO(this->get_logger(), "Planning failed RIP");
+      return false;
     }
   }
 
@@ -143,8 +185,8 @@ private:
 
     // Set the planning time (in seconds)
     move_group->setPlanningTime(5.0); 
-    move_group->setMaxVelocityScalingFactor(0.8);   // Max speed (1.0 is full speed)
-    move_group->setMaxAccelerationScalingFactor(0.2); // Max acceleration
+    move_group->setMaxVelocityScalingFactor(0.8);   
+    move_group->setMaxAccelerationScalingFactor(0.2); 
 
     moveit::planning_interface::MoveGroupInterface::Plan plan;
     bool success = (move_group->plan(plan) == moveit::planning_interface::MoveItErrorCode::SUCCESS);
@@ -152,8 +194,10 @@ private:
     if (success) {
       move_group->execute(plan);
       control_gripper(0.04); 
+      return true;
     } else {
       RCLCPP_INFO(this->get_logger(), "Planning failed RIP");
+      return false;
     }
   }
 
@@ -174,16 +218,18 @@ private:
 
     // Set the planning time (in seconds)
     move_group->setPlanningTime(5.0); 
-    move_group->setMaxVelocityScalingFactor(0.8);   // Max speed (1.0 is full speed)
-    move_group->setMaxAccelerationScalingFactor(0.2); // Max acceleration
+    move_group->setMaxVelocityScalingFactor(0.8);   
+    move_group->setMaxAccelerationScalingFactor(0.2); 
 
     moveit::planning_interface::MoveGroupInterface::Plan plan;
     bool success = (move_group->plan(plan) == moveit::planning_interface::MoveItErrorCode::SUCCESS);
 
     if (success) {
       move_group->execute(plan);
+      return true;
     } else {
       RCLCPP_INFO(this->get_logger(), "Planning failed RIP");
+      return false;
     }
   }
 
@@ -204,8 +250,8 @@ private:
 
     // Set the planning time (in seconds)
     move_group->setPlanningTime(5.0); 
-    move_group->setMaxVelocityScalingFactor(0.8);   // Max speed (1.0 is full speed)
-    move_group->setMaxAccelerationScalingFactor(0.2); // Max acceleration
+    move_group->setMaxVelocityScalingFactor(0.8);   
+    move_group->setMaxAccelerationScalingFactor(0.2); 
 
     moveit::planning_interface::MoveGroupInterface::Plan plan;
     bool success = (move_group->plan(plan) == moveit::planning_interface::MoveItErrorCode::SUCCESS);
@@ -213,8 +259,10 @@ private:
     if (success) {
       move_group->execute(plan);
       control_gripper(0.04); 
+      return true;
     } else {
       RCLCPP_INFO(this->get_logger(), "Planning failed RIP");
+      return false;
     }
   }
 
