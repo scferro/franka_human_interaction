@@ -9,6 +9,14 @@ from sensor_msgs.msg import Image, CameraInfo
 from visualization_msgs.msg import Marker
 from visualization_msgs.msg import MarkerArray
 from std_srvs.srv import Empty
+from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import Pose
+
+from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
+from tf2_ros import TransformBroadcaster
+from tf2_ros import Buffer, TransformListener
+import tf_transformations
+
 
 class Sorting(Node):
     def __init__(self):
@@ -48,16 +56,29 @@ class Sorting(Node):
             10)
         
         # Create timer
-        self.timer = self.create_timer(1.0, self.timer_callback)
+        self.timer = self.create_timer(0.1, self.timer_callback)
 
         # Create testing service
-        self.srv = self.create_service(Empty, 'empty_service', self.empty_service_callback)
+        self.scan_srv = self.create_service(Empty, 'scan', self.scan_srv_callback)
+
+        # Create TF broadcaster and buffer
+        self.tf_broadcaster = TransformBroadcaster(self)
+        self.tf_buffer = Buffer()
+        self.listener = TransformListener(self.tf_buffer, self)
+
+        # Publish static transform for camera once at startup
+        self.tf_static_broadcaster = StaticTransformBroadcaster(self)
+        self.make_static_transforms()
+
+        # Store block poses in a list
+        self.block_tfs = []
 
     def timer_callback(self):
-        # self.scan()
-        pass
+        for tf in self.block_tfs:
+            # Send the transformation
+            self.tf_broadcaster.sendTransform(tf)
 
-    def empty_service_callback(self, request, response):
+    def scan_srv_callback(self, request, response):
         self.scan()
         return response
 
@@ -94,13 +115,14 @@ class Sorting(Node):
                     # Check if points are too close
                     pt1, pt2 = simplified_approx[i-1], simplified_approx[i]
                     distance = np.sqrt((pt2[0] - pt1[0])**2 + (pt2[1] - pt1[1])**2)
-                    print(distance)
                     if distance < min_distance:
                         valid = False
                 if valid:
                     square_vertices.append(simplified_approx)
                     cv2.drawContours(image_out, [simplified_approx], 0, (0, 255, 0), 3)
 
+        count = 0
+        self.block_tfs = []
         for vert in square_vertices:
             # Get the midpoint of the square
             x1, y1 = vert[0][0], vert[0][1]
@@ -110,6 +132,50 @@ class Sorting(Node):
 
             # Get the 3D position
             x_3d, y_3d, z_3d = self.get_position(x_mid, y_mid)
+
+            pose = Pose()
+
+            block_id = 'block' + str(count)
+
+            # Read message content and assign it to
+            # corresponding tf variables
+            pose.header.stamp = self.get_clock().now().to_msg()
+            pose.header.frame_id = 'd405_link'
+
+            # Position
+            pose.pose.position.x = float(x_3d)
+            pose.pose.position.y = float(y_3d)
+            pose.pose.position.z = float(z_3d)
+
+            # Orientation
+            # q = quaternion_from_euler(0, 0, msg.theta)
+            pose.pose.orientation.x = 0.0
+            pose.pose.orientation.y = 0.0
+            pose.pose.orientation.z = 0.0
+            pose.pose.orientation.w = 1.0
+
+            # Convert to base link frame
+            world_pose = self.tf_buffer.transform(pose, 'world')
+
+            # Get world transform
+            t_world = TransformStamped()
+
+            t_world.header.stamp = self.get_clock().now().to_msg()
+            t_world.header.frame_id = 'world'
+            t_world.child_frame_id = block_id
+
+            t_world.transform.translation.x = pose.pose.position.x
+            t_world.transform.translation.y = pose.pose.position.y
+            t_world.transform.translation.z = pose.pose.position.z
+            
+            t_world.transform.rotation.x = 0.0
+            t_world.transform.rotation.y = 0.0
+            t_world.transform.rotation.z = 0.0
+            t_world.transform.rotation.w = 1.0
+
+            # Save TF
+            self.block_tfs.append(t_world)
+            count += 1
 
         img_msg_out = self.cv2_to_ros2_image(image_out)
         self.img_out_pub.publish(img_msg_out)
@@ -167,6 +233,41 @@ class Sorting(Node):
         except CvBridgeError as e:
             print(f"Error converting OpenCV image to ROS2 message: {e}")
             return None
+
+    def make_static_transforms(self):
+        t_cam = TransformStamped()
+
+        t_cam.header.stamp = self.get_clock().now().to_msg()
+        t_cam.header.frame_id = 'panda_hand'
+        t_cam.child_frame_id = 'd405_link'
+
+        t_cam.transform.translation.x = 0.05
+        t_cam.transform.translation.y = 0.0
+        t_cam.transform.translation.z = 0.04
+        
+        t_cam.transform.rotation.x = 0.0
+        t_cam.transform.rotation.y = 0.0
+        t_cam.transform.rotation.z = 0.0
+        t_cam.transform.rotation.w = 1.0
+
+        self.tf_static_broadcaster.sendTransform(t_cam)
+
+        t_world = TransformStamped()
+
+        t_world.header.stamp = self.get_clock().now().to_msg()
+        t_world.header.frame_id = 'world'
+        t_world.child_frame_id = 'panda_link_0'
+
+        t_world.transform.translation.x = 0.0
+        t_world.transform.translation.y = 0.0
+        t_world.transform.translation.z = 0.0
+        
+        t_world.transform.rotation.x = 0.0
+        t_world.transform.rotation.y = 0.0
+        t_world.transform.rotation.z = 0.0
+        t_world.transform.rotation.w = 1.0
+
+        self.tf_static_broadcaster.sendTransform(t_world)
 
 
 def main(args=None):
