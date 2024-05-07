@@ -19,7 +19,9 @@ setup(
     license='MIT',
     tests_require=['pytest'],
     entry_points={
-        'console_scripts': ['sorting = franka_hri.sorting:main'
+        'console_scripts': [
+            'sorting = franka_hri.sorting:main',
+            'reader = franka_hri.keyboard_input:main'
         ],
     },
 )
