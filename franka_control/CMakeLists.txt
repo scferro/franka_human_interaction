@@ -16,7 +16,11 @@ find_package(geometry_msgs REQUIRED)
 find_package(moveit_ros_planning_interface REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(tf2_ros REQUIRED)
+find_package(rclcpp_action REQUIRED)
 find_package(visualization_msgs REQUIRED)
+find_package(franka_hri_interfaces REQUIRED)
+find_package(franka_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 
 # Declare a C++ executable
 add_executable(sorting src/sorting.cpp)
@@ -27,6 +31,10 @@ ament_target_dependencies(sorting
   std_srvs
   tf2_ros
   visualization_msgs
+  rclcpp_action
+  franka_hri_interfaces
+  franka_msgs
+  std_msgs
 )
 
 # Install the executable
