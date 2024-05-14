@@ -1,6 +1,9 @@
 import cv2
 import numpy as np
 from cv_bridge import CvBridge, CvBridgeError
+import sys
+import tty
+import termios
 
 import rclpy
 from rclpy.node import Node
@@ -76,11 +79,29 @@ class Sorting(Node):
         self.tf_static_broadcaster = StaticTransformBroadcaster(self)
         self.make_static_transforms()
 
+        # Create timer
+        self.timer_period = 0.1  # seconds
+        self.timer = self.create_timer(self.timer_period, self.timer_callback)
+        self.timer_count = 0.0
+
         # Other setup
         self.bridge = CvBridge()
         self.last_img_msg = None
         self.last_depth_msg = None
         self.block_tfs = []
+
+    def timer_callback(self):
+        self.timer_count += self.timer_period
+
+    def get_key(self):
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setraw(sys.stdin.fileno())
+            ch = sys.stdin.read(1)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        return ch
 
     async def send_pose_goal(self, pose, vel_factor=0.2, accel_factor=0.2):
         """Send a pose goal to the action server."""
@@ -161,8 +182,9 @@ class Sorting(Node):
         # Extract image from message
         image = self.ros2_image_to_cv2(self.last_img_msg)
 
-        # Convert to grayscale
+        # Convert to grayscale, equalize
         gray_img = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        # gray_img = cv2.equalizeHist(gray_img)
 
         # Canny edge detection
         edges = cv2.Canny(gray_img, 50, 150, apertureSize=3)
@@ -332,18 +354,70 @@ class Sorting(Node):
             grab_pose_1.orientation.y = quaternion[1]
             grab_pose_1.orientation.z = quaternion[2]
             grab_pose_1.orientation.w = quaternion[3]
-
+            
+            # Hover above object
             await self.send_pose_goal(grab_pose_1, vel_factor=0.5, accel_factor=0.1)
 
+            # Move in to grasp
             grab_pose_2 = grab_pose_1
-
             grab_pose_2.position.z = self.block_tfs[0].transform.translation.z + 0.04
 
             await self.send_pose_goal(grab_pose_2, vel_factor=0.5, accel_factor=0.1)
 
+            # Grasp block
             await self.grasp_block(0.02)
+
+            rand = np.random.random()
+
+            # Create wait pose
+            wait_pose = Pose()
+            wait_pose.position.x = 0.3
+            wait_pose.position.y = 0.2
+            wait_pose.position.z = 0.3
+            wait_pose.orientation.x = 1.0
+            wait_pose.orientation.y = 0.0
+            wait_pose.orientation.z = 0.0
+            wait_pose.orientation.w = 0.0
+
+            # Create drop pose
+            drop_pose = Pose()
+            drop_pose.position.x = 0.3
+            drop_pose.position.y = 0.2
+            drop_pose.position.z = 0.1
+            drop_pose.orientation.x = 1.0
+            drop_pose.orientation.y = 0.0
+            drop_pose.orientation.z = 0.0
+            drop_pose.orientation.w = 0.0
+
+            if rand > 0.5:
+                wait_pose.position.y = -wait_pose.position.y
+
+            # Move to wait pose
+            await self.send_pose_goal(wait_pose, vel_factor=0.8, accel_factor=0.1)
+            
+            # Wait for input from user
+            self.timer_count = 0.0
+            key = ''
+            while (self.timer_count < 5.0) and (key != 'l') and (key != 'r'):
+                key = self.get_key()
+
+            if (key != 'l') and (key != 'r'):
+                drop_pose.position.y = wait_pose.position.y
+            elif key=='l':
+                drop_pose.position.y = -0.2
+            elif key=='r':
+                drop_pose.position.y = 0.2
+
+            # Move to drop pose
+            await self.send_pose_goal(drop_pose, vel_factor=0.8, accel_factor=0.1)
+
+            # Drop block
+            await self.grasp_block(0.04)
+
         else:
             self.get_logger().warn("No blocks detected")
+
+        await self.send_pose_goal(scan_pose, vel_factor=0.8, accel_factor=0.2)
 
         return response
 
