@@ -1,0 +1,10 @@
+# Goal
+geometry_msgs/Pose goal_pose
+float32 vel_factor
+float32 accel_factor
+---
+# Result
+bool success
+geometry_msgs/Pose true_pose
+---
+# Feedback
