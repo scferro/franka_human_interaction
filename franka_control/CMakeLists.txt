@@ -23,8 +23,8 @@ find_package(franka_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 
 # Declare a C++ executable
-add_executable(sorting src/sorting.cpp)
-ament_target_dependencies(sorting
+add_executable(manipulate_blocks src/manipulate_blocks.cpp)
+ament_target_dependencies(manipulate_blocks
   rclcpp
   geometry_msgs
   moveit_ros_planning_interface
@@ -39,7 +39,7 @@ ament_target_dependencies(sorting
 
 # Install the executable
 install(TARGETS
-  sorting
+  manipulate_blocks
   DESTINATION lib/${PROJECT_NAME}
 )
 

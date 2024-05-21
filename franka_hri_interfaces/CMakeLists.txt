@@ -14,12 +14,14 @@ find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(franka_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "action/EmptyAction.action"
   "action/PoseAction.action"
   "srv/CreateBox.srv"
-    DEPENDENCIES geometry_msgs franka_msgs
+  "srv/UpdateMarkers.srv"
+    DEPENDENCIES geometry_msgs franka_msgs visualization_msgs
     )
 
 if(BUILD_TESTING)

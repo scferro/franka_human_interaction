@@ -1,0 +1,4 @@
+visualization_msgs/MarkerArray input_markers
+int32[] markers_to_update
+---
+visualization_msgs/MarkerArray output_markers
