@@ -19,6 +19,8 @@ from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
 from tf2_ros import TransformBroadcaster, Buffer, TransformListener
 from tf2_geometry_msgs.tf2_geometry_msgs import do_transform_point
 
+from network import SortingNet
+
 class Sorting(Node):
     def __init__(self):
         super().__init__('sorting')
@@ -47,8 +49,11 @@ class Sorting(Node):
         # Publisher for MarkerArray
         self.block_pub = self.create_publisher(MarkerArray, 'blocks', 10)
 
-        # Create testing service
+        # Create scan_overhead service
         self.scan_overhead_srv = self.create_service(UpdateMarkers, 'scan_overhead', self.scan_overhead)
+
+        # Create update_marker service
+        self.update_marker_srv = self.create_service(UpdateMarkers, 'update_marker', self.update_marker)
 
         # Create TF broadcaster and buffer
         self.tf_broadcaster = TransformBroadcaster(self)
@@ -78,6 +83,23 @@ class Sorting(Node):
         self.fy = None
         self.cx = None
         self.cy = None
+
+    def update_marker(self, request, response):
+        # Extract markers and indices from request
+        new_markers = request.input_markers.markers
+        marker_index_list = request.markers_to_update
+
+        # update markers
+        for i in range(len(marker_index_list)):
+            index = marker_index_list[i]
+            marker = new_markers[i]
+
+            self.block_markers.markers[index] = marker
+
+        # Return updated markers
+        response.output_markers = self.block_markers
+
+        return response
 
     # def segment_depth(self, rgb_image, depth_image):
     #     h, w = depth_image.shape
