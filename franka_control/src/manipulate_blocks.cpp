@@ -11,6 +11,9 @@
 #include <franka_msgs/action/grasp.hpp>
 #include <franka_msgs/action/homing.hpp>
 
+#include <tf2_ros/transform_listener.h>
+#include <geometry_msgs/msg/transform_stamped.hpp>
+
 #include "franka_hri_interfaces/action/pose_action.hpp"
 #include "franka_hri_interfaces/action/empty_action.hpp"
 #include "franka_hri_interfaces/srv/create_box.hpp"
@@ -39,13 +42,25 @@ public:
     // Create a client for the overhead scanning service
     scan_overhead_cli = this->create_client<franka_hri_interfaces::srv::UpdateMarkers>("scan_overhead");
 
+    // Create a client for the update_markers service
+    update_markers_cli = this->create_client<franka_hri_interfaces::srv::UpdateMarkers>("update_markers");
+
     // Create a publisher for block markers
     block_pub = this->create_publisher<visualization_msgs::msg::MarkerArray>("blocks", 10);
+
+    // Create a subscriber for the blocks
+    block_markers_sub = this->create_subscription<visualization_msgs::msg::MarkerArray>(
+        "blocks", 10, std::bind(&ManipulateBlocks::marker_array_callback, this, std::placeholders::_1));
 
     // Create action clients for the gripper
     gripper_homing_client = rclcpp_action::create_client<franka_msgs::action::Homing>(this, "panda_gripper/homing");
     gripper_grasping_client = rclcpp_action::create_client<franka_msgs::action::Grasp>(this, "panda_gripper/grasp");
+    
+    // Create a transform listener
+    tfBuffer = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+    tfListener = std::make_shared<tf2_ros::TransformListener>(*tfBuffer);
 
+    // Create array of block markers
     block_markers = visualization_msgs::msg::MarkerArray();
 
     // Initialize the locations to make stacks
@@ -96,10 +111,6 @@ public:
 
     // Call the create_collision_box function
     // create_collision_box(target_pose, box_size, box_id);
-
-    // Create a subscriber for the blocks
-    block_markers_sub = this->create_subscription<visualization_msgs::msg::MarkerArray>(
-        "blocks", 10, std::bind(&ManipulateBlocks::marker_array_callback, this, std::placeholders::_1));
   }
 
 private:
@@ -116,34 +127,153 @@ private:
   std::shared_ptr<moveit::planning_interface::MoveGroupInterface> move_group;
   std::shared_ptr<moveit::planning_interface::PlanningSceneInterface> planning_scene_interface;
   rclcpp::Client<franka_hri_interfaces::srv::UpdateMarkers>::SharedPtr scan_overhead_cli;
+  rclcpp::Client<franka_hri_interfaces::srv::UpdateMarkers>::SharedPtr update_markers_cli;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr block_pub;
+  std::shared_ptr<tf2_ros::Buffer> tfBuffer;
+  std::shared_ptr<tf2_ros::TransformListener> tfListener;
 
   void sort_blocks(const std::shared_ptr<rclcpp_action::ServerGoalHandle<franka_hri_interfaces::action::EmptyAction>> goal_handle)
   {
+    // Create overhead scan pose
     auto overhead_scan_pose = geometry_msgs::msg::PoseStamped();
-
-    // Fill out the header
     overhead_scan_pose.header.stamp = this->get_clock()->now();
     overhead_scan_pose.header.frame_id = "world";
-
-    // Fill out the pose
     overhead_scan_pose.pose.position.x = 0.3;
     overhead_scan_pose.pose.position.y = 0.0;
     overhead_scan_pose.pose.position.z = 0.25;
-
     overhead_scan_pose.pose.orientation.x = 1.0;
     overhead_scan_pose.pose.orientation.y = 0.0;
     overhead_scan_pose.pose.orientation.z = 0.0;
     overhead_scan_pose.pose.orientation.w = 0.0;
 
+    // Set planning parameters
     double planning_time = 10.;
     double vel_factor = 0.8;
     double accel_factor = 0.2;
 
+    // Move to overhead scan pose
     move_to_pose(overhead_scan_pose, planning_time, vel_factor, accel_factor);
 
+    // Perform scan for blocks
     auto request = std::make_shared<franka_hri_interfaces::srv::UpdateMarkers::Request>();
     request->input_markers = block_markers;
+    request->update_scale = true;
+    int count = 0;
+    while ((!scan_overhead_cli->wait_for_service(1s)) && (count < 5)) {
+      RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Waiting for scan_overhead service...");
+      count++;
+    }
+    auto future = scan_overhead_cli->async_send_request(request);
+    auto result = future.get();
+    block_markers = result->output_markers;
+
+    for (int i = 0; i < (block_markers.markers.size()); i++) {
+      // Refinement scan
+      bool update_scale = true;
+      scan_block(i, update_scale);
+
+      // pick up block
+      grab_block(i);
+
+      // Calculate top of stack
+      auto last_marker_index = pile_0_index.back();
+      auto last_marker = block_markers.markers[last_marker_index];
+      double top_z = last_marker.pose.position.z + (last_marker.scale.z / 2);
+
+      // Calculate place height an place pose
+      double z_place = top_z + (block_markers.markers[i].scale.z / 2);
+      auto place_pose = pile_0_start;
+      place_pose.position.z = z_place;
+      place_block(place_pose);
+
+      // Add block index to pile vector
+      pile_0_index.push_back(i);
+
+      // Refinement scan after placing block
+      update_scale = false;
+      scan_block(i, update_scale);
+    }
+  }
+
+  void place_block(geometry_msgs::msg::Pose place_pose)
+  {
+    // Set planning parameters
+    double planning_time = 10.;
+    double vel_factor = 0.8;
+    double accel_factor = 0.2;
+
+    // Move above top of stack
+    auto hover_pose = geometry_msgs::msg::PoseStamped();
+    hover_pose.header.stamp = this->get_clock()->now();
+    hover_pose.header.frame_id = "world";
+    hover_pose.pose.position.x = place_pose.position.x;
+    hover_pose.pose.position.y = place_pose.position.y;
+    hover_pose.pose.position.z = place_pose.position.z + 0.1;
+    hover_pose.pose.orientation.x = 1.0;
+    hover_pose.pose.orientation.y = 0.0;
+    hover_pose.pose.orientation.z = 0.0;
+    hover_pose.pose.orientation.w = 0.0;
+    move_to_pose(hover_pose, planning_time, vel_factor, accel_factor);
+
+    // Move down to drop brick
+    auto drop_pose = hover_pose;
+    drop_pose.pose.position.z = place_pose.position.z + 0.03;
+    move_to_pose(drop_pose, planning_time, vel_factor, accel_factor);
+
+    // Open gripper
+    double width = 0.04;
+    double speed = 0.2;
+    double force = 1.;
+    send_grasp_goal(width, speed, force);
+
+    // Move back to hover pose
+    move_to_pose(hover_pose, planning_time, vel_factor, accel_factor);
+  }
+
+  void scan_block(int i, bool update_scale)
+  {
+    // Get current marker
+    auto marker = block_markers.markers[i];
+
+    // Get tf from hand to camera to position camera directly above block
+    std::string sourceFrame = "panda_hand";
+    std::string targetFrame = "d405_link";
+    // Look up the transform between the source and target frames
+    geometry_msgs::msg::TransformStamped transformStamped =
+        tfBuffer->lookupTransform(targetFrame, sourceFrame, tf2::TimePointZero);
+    // Access the y dimension of the transform
+    double x_trans = transformStamped.transform.translation.x;
+
+    // Move above the block
+    auto scan_pose = geometry_msgs::msg::PoseStamped();
+
+    // Fill out the header
+    scan_pose.header.stamp = this->get_clock()->now();
+    scan_pose.header.frame_id = "world";
+
+    // Fill out the pose
+    scan_pose.pose.position.x = marker.pose.position.x;
+    scan_pose.pose.position.y = marker.pose.position.y - x_trans;
+    scan_pose.pose.position.z = 0.15;
+
+    // Set the orientation of the grab pose
+    scan_pose.pose.orientation.x = 1.0;
+    scan_pose.pose.orientation.y = 0.0;
+    scan_pose.pose.orientation.z = 0.0;
+    scan_pose.pose.orientation.w = 0.0;
+
+    double planning_time = 20.;
+    double vel_factor = 0.4;
+    double accel_factor = 0.2;
+
+    move_to_pose(scan_pose, planning_time, vel_factor, accel_factor);
+
+    // Perform a refinement scan
+    auto request = std::make_shared<franka_hri_interfaces::srv::UpdateMarkers::Request>();
+    request->input_markers = block_markers;
+    std::vector<int> update = {i};
+    request->markers_to_update = update;
+    request->update_scale = update_scale;
 
     int count = 0;
     while ((!scan_overhead_cli->wait_for_service(1s)) && (count < 5)) {
@@ -154,47 +284,6 @@ private:
     auto future = scan_overhead_cli->async_send_request(request);
     auto result = future.get();
     block_markers = result->output_markers;
-
-    for (int i = 0; i < (block_markers.markers.size()); i++) {
-      // pick up block
-      grab_block(i);
-
-      // Calculate top of stack
-      double top_z = 0.0;
-      for (int j = 0; j < (pile_0_index.size()); j++) {
-        auto block = block_markers.markers[j];
-        top_z += block.scale.z;
-      }
-
-      // Calculate place height
-      double z_place = top_z + (block_markers.markers[i].scale.z / 2);
-      RCLCPP_INFO(this->get_logger(), "Z-Place: %s", std::to_string(z_place).c_str());
-
-      // Move above top of stack
-      auto hover_pose = overhead_scan_pose;
-      hover_pose.header.stamp = this->get_clock()->now();
-      hover_pose.pose.position.x = pile_0_start.position.x;
-      hover_pose.pose.position.y = pile_0_start.position.y;
-      hover_pose.pose.position.z = z_place + 0.1;
-      move_to_pose(hover_pose, planning_time, vel_factor, accel_factor);
-
-      // Move down to drop brick
-      auto drop_pose = hover_pose;
-      drop_pose.pose.position.z = z_place + 0.03;
-      move_to_pose(drop_pose, planning_time, vel_factor, accel_factor);
-
-      // Open gripper
-      double width = 0.04;
-      double speed = 0.2;
-      double force = 1.;
-      send_grasp_goal(width, speed, force);
-
-      // Add block index to pile vector
-      pile_0_index.push_back(i);
-
-      // Move back to hover pose
-      move_to_pose(hover_pose, planning_time, vel_factor, accel_factor);
-    }
   }
 
   void grab_block(int i)
@@ -212,13 +301,10 @@ private:
     // Fill out the pose
     grab_pose_1.pose.position.x = marker.pose.position.x;
     grab_pose_1.pose.position.y = marker.pose.position.y;
-    grab_pose_1.pose.position.z = 0.15;
+    grab_pose_1.pose.position.z = 0.12;
 
     // Set the orientation of the grab pose
-    grab_pose_1.pose.orientation.x = 1.0;
-    grab_pose_1.pose.orientation.y = 0.0;
-    grab_pose_1.pose.orientation.z = 0.0;
-    grab_pose_1.pose.orientation.w = 0.0;
+    grab_pose_1.pose.orientation = marker.pose.orientation;
 
     double planning_time = 20.;
     double vel_factor = 0.4;
@@ -226,38 +312,13 @@ private:
 
     move_to_pose(grab_pose_1, planning_time, vel_factor, accel_factor);
 
-    // Perform a refinement scan
-    auto request = std::make_shared<franka_hri_interfaces::srv::UpdateMarkers::Request>();
-    request->input_markers = block_markers;
-    std::vector<int> update = {i};
-    request->markers_to_update = update;
-
-    int count = 0;
-    while ((!scan_overhead_cli->wait_for_service(1s)) && (count < 5)) {
-      RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Waiting for scan_overhead service...");
-      count++;
-    }
-
-    auto future = scan_overhead_cli->async_send_request(request);
-    auto result = future.get();
-    block_markers = result->output_markers;
-
-    // Rotate gripper above the block
+    // Grab the block
     auto grab_pose_2 = grab_pose_1;
 
-    // Set the orientation of the grab pose
-    grab_pose_2.pose.position.z = 0.12;
-    grab_pose_2.pose.orientation = marker.pose.orientation;
-
-    move_to_pose(grab_pose_2, planning_time, vel_factor, accel_factor);
-
-    // Grab the block
-    auto grab_pose_3 = grab_pose_2;
-
     // Fill out the changes to the pose and move to pose
-    grab_pose_3.header.stamp = this->get_clock()->now();
-    grab_pose_3.pose.position.z = marker.pose.position.z + 0.03;
-    move_to_pose(grab_pose_3, planning_time, vel_factor, accel_factor);
+    grab_pose_2.header.stamp = this->get_clock()->now();
+    grab_pose_2.pose.position.z = marker.pose.position.z + 0.03;
+    move_to_pose(grab_pose_2, planning_time, vel_factor, accel_factor);
 
     // Close gripper
     double width = 0.02;

@@ -1,4 +1,5 @@
 visualization_msgs/MarkerArray input_markers
 int32[] markers_to_update
+bool update_scale
 ---
 visualization_msgs/MarkerArray output_markers

@@ -21,6 +21,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "action/PoseAction.action"
   "srv/CreateBox.srv"
   "srv/UpdateMarkers.srv"
+  "srv/SortNet.srv"
     DEPENDENCIES geometry_msgs franka_msgs visualization_msgs
     )
 

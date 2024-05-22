@@ -20,8 +20,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'sorting = franka_hri.sorting:main',
-            'reader = franka_hri.keyboard_input:main'
+            'blocks = franka_hri.blocks:main',
+            'human_input = franka_hri.human_input:main'
         ],
     },
 )

@@ -9,11 +9,11 @@ from std_msgs.msg import Int8
 #
 # Publishes a 0 for "L" (left) and a 1 for "R" (right)
 #
-class KeyPublisher(Node):
+class HumanInput(Node):
 
     # Initialize the node
     def __init__(self):   
-        super().__init__('key_publisher')
+        super().__init__('human_input')
         self.publisher_ = self.create_publisher(Int8, 'keyboard', 10)
         self.keyPressed = False
         
@@ -46,7 +46,7 @@ class KeyPublisher(Node):
 def main(args=None):
     rclpy.init(args=args)
 
-    key_publisher = KeyPublisher()
+    key_publisher = HumanInput()
 
     key_publisher.spin()  
 

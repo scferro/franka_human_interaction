@@ -9,7 +9,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo
 from visualization_msgs.msg import MarkerArray, Marker
 from std_srvs.srv import Empty
-from franka_hri_interfaces.srv import UpdateMarkers
+from franka_hri_interfaces.srv import UpdateMarkers, SortNet
 from geometry_msgs.msg import Pose, PoseStamped, TransformStamped, PointStamped
 
 from geometry_msgs.msg import Quaternion
@@ -21,9 +21,9 @@ from tf2_geometry_msgs.tf2_geometry_msgs import do_transform_point
 
 from network import SortingNet
 
-class Sorting(Node):
+class Blocks(Node):
     def __init__(self):
-        super().__init__('sorting')
+        super().__init__('blocks')
 
         # Subscriber to the Image topic
         self.img_sub = self.create_subscription(
@@ -50,10 +50,15 @@ class Sorting(Node):
         self.block_pub = self.create_publisher(MarkerArray, 'blocks', 10)
 
         # Create scan_overhead service
-        self.scan_overhead_srv = self.create_service(UpdateMarkers, 'scan_overhead', self.scan_overhead)
+        self.scan_overhead_srv = self.create_service(UpdateMarkers, 'scan_overhead', self.scan_overhead_callback)
 
         # Create update_marker service
-        self.update_marker_srv = self.create_service(UpdateMarkers, 'update_marker', self.update_marker)
+        self.update_markers_srv = self.create_service(UpdateMarkers, 'update_markers', self.update_markers_callback)
+
+        # Create the nn object and prediction and training services
+        self.network = SortingNet()
+        self.train_network_srv = self.create_service(SortNet, 'train_network', self.train_network_callback)
+        self.get_network_prediction_srv = self.create_service(SortNet, 'get_network_prediction', self.get_network_prediction_callback)
 
         # Create TF broadcaster and buffer
         self.tf_broadcaster = TransformBroadcaster(self)
@@ -84,7 +89,13 @@ class Sorting(Node):
         self.cx = None
         self.cy = None
 
-    def update_marker(self, request, response):
+    def train_network_callback(self):
+        pass
+
+    def get_network_prediction_callback(self):
+        pass
+
+    def update_markers_callback(self, request, response):
         # Extract markers and indices from request
         new_markers = request.input_markers.markers
         marker_index_list = request.markers_to_update
@@ -230,7 +241,7 @@ class Sorting(Node):
         
         return contours_out, masked_image
 
-    def scan_overhead(self, request, response):
+    def scan_overhead_callback(self, request, response):
         """Function to scan table to determine approximate size and position of blocks."""
         if self.last_img_msg is None:
             return
@@ -255,6 +266,8 @@ class Sorting(Node):
         markers = request.input_markers
         markers_to_update = list(request.markers_to_update)
         print(markers_to_update)
+
+        update_scale = request.update_scale
 
         # Iterate through each contour
         for contour in contours:
@@ -363,11 +376,13 @@ class Sorting(Node):
                 # Check if the marker has already been scanned
                 similar_marker_index = self.find_similar_marker(marker, markers)
 
+                if not update_scale:
+                    marker.scale = markers.markers[similar_marker_index].scale
+                    marker.pose.position.z = world_point.point.z  - (marker.scale.z / 2)
+
                 update_marker = False
                 if markers_to_update==[] or (similar_marker_index in markers_to_update):
                     update_marker = True
-                
-                print(update_marker)
 
                 if similar_marker_index==-1 and update_marker:
                     # Set marker ID and add marker to array
@@ -400,8 +415,6 @@ class Sorting(Node):
 
         if u >= depth_width: u = depth_width - 1
         if v >= depth_height: v = depth_height - 1
-        print(u, v)
-        print()
 
         z = depth_array[v, u] / 1000.0  # Depth in meters
 
@@ -519,7 +532,7 @@ class Sorting(Node):
         t_cam.header.frame_id = 'panda_hand'
         t_cam.child_frame_id = 'd405_link'
 
-        t_cam.transform.translation.x = 0.07
+        t_cam.transform.translation.x = 0.065
         t_cam.transform.translation.y = 0.0
         t_cam.transform.translation.z = 0.04
 
@@ -550,7 +563,7 @@ class Sorting(Node):
 def main(args=None):
     """The main function."""
     rclpy.init(args=args)
-    node = Sorting()
+    node = Blocks()
     executor = rclpy.executors.MultiThreadedExecutor()
     executor.add_node(node)
     executor.spin()
