@@ -6,24 +6,27 @@ import torchvision.transforms as transforms
 # Define the neural network architecture
 class SortingNet(nn.Module):
     def __init__(self):
-        super(BlockSortingNet, self).__init__()
-        self.conv1 = nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1)
+        super(SortingNet, self).__init__()
+        self.conv1 = nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1)
         self.relu1 = nn.ReLU(inplace=True)
         self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)
+        self.conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1)
         self.relu2 = nn.ReLU(inplace=True)
         self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1)
-        self.relu3 = nn.ReLU(inplace=True)
         self.flatten = nn.Flatten()
-        self.fc1 = nn.Linear(64 * 32 * 32, 64)
-        self.relu4 = nn.ReLU(inplace=True)
-        self.fc2 = nn.Linear(64, 1)
+        self.fc1 = nn.Linear(32 * 32 * 32, 32)
+        self.relu3 = nn.ReLU(inplace=True)
+        self.fc2 = nn.Linear(32, 1)
         self.sigmoid = nn.Sigmoid()
+
+        # Learning rate
+        self.lr_init = 0.1
+        self.lr_decay = 0.9
 
         # Create optimizer and criterion
         self.criterion = nn.BCELoss()
-        self.optimizer = optim.Adam(self.parameters(), lr=0.001)
+        self.optimizer = optim.Adam(self.parameters(), lr=self.lr_init)
+        self.scheduler = optim.lr_scheduler.ExponentialLR(self.optimizer, gamma=self.lr_decay)
 
     def forward(self, x):
         x = self.conv1(x)
@@ -32,17 +35,14 @@ class SortingNet(nn.Module):
         x = self.conv2(x)
         x = self.relu2(x)
         x = self.pool2(x)
-        x = self.conv3(x)
-        x = self.relu3(x)
         x = self.flatten(x)
         x = self.fc1(x)
-        x = self.relu4(x)
+        x = self.relu3(x)
         x = self.fc2(x)
         x = self.sigmoid(x)
         return x
-    
-    def train_network(self, image, label):
 
+    def train_network(self, image, label):
         # Convert the label to a tensor
         label = torch.tensor([label], dtype=torch.float32)
 
@@ -50,7 +50,7 @@ class SortingNet(nn.Module):
         self.optimizer.zero_grad()
 
         # Forward pass
-        output = self.forward(image.unsqueeze(0))
+        output = self.forward(image)
 
         # Calculate the loss
         loss = self.criterion(output, label)
@@ -58,3 +58,6 @@ class SortingNet(nn.Module):
         # Backward pass and optimization
         loss.backward()
         self.optimizer.step()
+
+        # Update learning rate for next iteration
+        self.scheduler.step()

@@ -19,13 +19,14 @@ from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
 from tf2_ros import TransformBroadcaster, Buffer, TransformListener
 from tf2_geometry_msgs.tf2_geometry_msgs import do_transform_point
 
-from network import SortingNet
+from franka_hri.network import SortingNet
+import torchvision.transforms as transforms
 
 class Blocks(Node):
     def __init__(self):
         super().__init__('blocks')
 
-        # Subscriber to the Image topic
+        # Subscriber to the d405 Image topic
         self.img_sub = self.create_subscription(
             Image,
             '/camera/d405/color/image_rect_raw',
@@ -67,7 +68,6 @@ class Blocks(Node):
 
         # Publish static transform for camera once at startup
         self.tf_static_broadcaster = StaticTransformBroadcaster(self)
-        self.make_static_transforms()
 
         # Create timer
         self.timer_period = 0.1  # seconds
@@ -84,16 +84,62 @@ class Blocks(Node):
         # Other setup
         self.bridge = CvBridge()
         self.block_markers = MarkerArray()
+        self.block_images = []
+        self.make_static_transforms()
         self.fx = None
         self.fy = None
         self.cx = None
         self.cy = None
 
-    def train_network_callback(self):
-        pass
+    def train_network_callback(self, request, response):
+        # Get block index and label from message
+        block_index = request.index
+        label = request.label
 
-    def get_network_prediction_callback(self):
-        pass
+        # Get images of block
+        images = self.block_images[block_index]
+
+        # Train the network using the images
+        for img in images:
+            tensor = self.preprocess_image(img)
+            self.network.train_network(tensor, label)
+
+        return response
+
+    def get_network_prediction_callback(self, request, response):
+        # Get block index from message
+        block_index = request.index
+
+        # Get images of block
+        images = self.block_images[block_index]
+
+        # Get prediction for each image in the network
+        pred_list = []
+        for img in images:
+            tensor = self.preprocess_image(img)
+            pred = self.network.forward(tensor)
+            pred_list.append(pred)
+
+        # Return average prediction for the images
+        response = np.mean(pred_list)
+        return response
+
+    def preprocess_image(self, image):
+        # Define the transformation pipeline
+        transform = transforms.Compose([
+            transforms.ToPILImage(),
+            transforms.Resize((128, 128)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+
+        # Apply the transformations to the image
+        image_tensor = transform(image)
+
+        # Add a batch dimension to the tensor
+        image_tensor = image_tensor.unsqueeze(0)
+
+        return image_tensor
 
     def update_markers_callback(self, request, response):
         # Extract markers and indices from request
@@ -112,100 +158,100 @@ class Blocks(Node):
 
         return response
 
-    # def segment_depth(self, rgb_image, depth_image):
-    #     h, w = depth_image.shape
-        
-    #     # Convert depth image to 8-bit for processing
-    #     depth_image_8bit = cv2.convertScaleAbs(depth_image, alpha=255.0 / (np.max(depth_image) - np.min(depth_image)))
-
-    #     # Apply Gaussian blur to reduce noise
-    #     blur = cv2.GaussianBlur(depth_image_8bit, (5, 5), 0)
-
-    #     # Apply Canny edge detection
-    #     edges = cv2.Canny(blur, 30, 150)
-
-    #     # Apply Hough Transform to detect lines
-    #     lines = cv2.HoughLines(edges, 1, np.pi / 180, 80)
-
-    #     # Create a mask image with black background
-    #     mask = np.zeros_like(depth_image_8bit)
-
-    #     # Iterate over the detected lines and draw them on the mask
-    #     if lines is not None:
-    #         for line in lines:
-    #             rho, theta = line[0]
-    #             a = np.cos(theta)
-    #             b = np.sin(theta)
-    #             x0 = a * rho
-    #             y0 = b * rho
-    #             x1 = int(x0 + 1000 * (-b))
-    #             y1 = int(y0 + 1000 * (a))
-    #             x2 = int(x0 - 1000 * (-b))
-    #             y2 = int(y0 - 1000 * (a))
-
-    #             cv2.line(mask, (x1, y1), (x2, y2), 255, 2)
-
-    #     # Find the contours in the mask
-    #     inverted_mask = cv2.bitwise_not(mask)
-    #     contours, _ = cv2.findContours(inverted_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    #     # Create a new mask image with black background
-    #     table_mask = np.zeros_like(depth_image_8bit)
-
-    #     # Draw the largest contour (assumed to be the table) on the new mask with white color
-    #     if contours:
-    #         largest_contour = max(contours, key=cv2.contourArea)
-    #         cv2.drawContours(table_mask, [largest_contour], -1, 255, -1)
-
-    #     # Apply morphological closing to remove noise
-    #     kernel = np.ones((11,11), np.uint8)
-    #     closed_mask = cv2.morphologyEx(table_mask, cv2.MORPH_CLOSE, kernel)
-
-    #     # Apply the mask to the depth image to extract the table region
-    #     table_segmented = cv2.bitwise_and(rgb_image, rgb_image, mask=closed_mask)
-
-    #     return table_segmented
-
     def segment_depth(self, rgb_image, depth_image):
         h, w = depth_image.shape
-
+        
         # Convert depth image to 8-bit for processing
         depth_image_8bit = cv2.convertScaleAbs(depth_image, alpha=255.0 / (np.max(depth_image) - np.min(depth_image)))
 
-        # Reshape the depth image to a 2D array of pixels
-        pixels = depth_image_8bit.reshape((-1, 1))
+        # Apply Gaussian blur to reduce noise
+        blur = cv2.GaussianBlur(depth_image_8bit, (5, 5), 0)
 
-        # Convert to float32
-        pixels = np.float32(pixels)
+        # Apply Canny edge detection
+        edges = cv2.Canny(blur, 30, 150)
 
-        # Define criteria, number of clusters (K) and apply kmeans()
-        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
-        K = 2
-        _, labels, centers = cv2.kmeans(pixels, K, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
-
-        # Convert back to 8-bit values
-        centers = np.uint8(centers)
-
-        # Flatten the labels array
-        labels = labels.flatten()
-
-        # Convert all pixels to the color of the centroids
-        segmented_image = centers[labels]
-
-        # Reshape back to the original image dimension
-        segmented_image = segmented_image.reshape(depth_image_8bit.shape)
+        # Apply Hough Transform to detect lines
+        lines = cv2.HoughLines(edges, 1, np.pi / 180, 80)
 
         # Create a mask image with black background
         mask = np.zeros_like(depth_image_8bit)
 
-        # Assign the foreground cluster to white (255) in the mask
-        foreground_cluster = np.argmax(centers)
-        mask[segmented_image == centers[foreground_cluster]] = 255
+        # Iterate over the detected lines and draw them on the mask
+        if lines is not None:
+            for line in lines:
+                rho, theta = line[0]
+                a = np.cos(theta)
+                b = np.sin(theta)
+                x0 = a * rho
+                y0 = b * rho
+                x1 = int(x0 + 1000 * (-b))
+                y1 = int(y0 + 1000 * (a))
+                x2 = int(x0 - 1000 * (-b))
+                y2 = int(y0 - 1000 * (a))
 
-        # Apply the mask to the RGB image to extract the foreground
-        foreground_segmented = cv2.bitwise_and(rgb_image, rgb_image, mask=mask)
+                cv2.line(mask, (x1, y1), (x2, y2), 255, 2)
 
-        return foreground_segmented
+        # Find the contours in the mask
+        inverted_mask = cv2.bitwise_not(mask)
+        contours, _ = cv2.findContours(inverted_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # Create a new mask image with black background
+        table_mask = np.zeros_like(depth_image_8bit)
+
+        # Draw the largest contour (assumed to be the table) on the new mask with white color
+        if contours:
+            largest_contour = max(contours, key=cv2.contourArea)
+            cv2.drawContours(table_mask, [largest_contour], -1, 255, -1)
+
+        # Apply morphological closing to remove noise
+        kernel = np.ones((11,11), np.uint8)
+        closed_mask = cv2.morphologyEx(table_mask, cv2.MORPH_CLOSE, kernel)
+
+        # Apply the mask to the depth image to extract the table region
+        table_segmented = cv2.bitwise_and(rgb_image, rgb_image, mask=closed_mask)
+
+        return table_segmented
+
+    # def segment_depth(self, rgb_image, depth_image):
+    #     h, w = depth_image.shape
+
+    #     # Convert depth image to 8-bit for processing
+    #     depth_image_8bit = cv2.convertScaleAbs(depth_image, alpha=255.0 / (np.max(depth_image) - np.min(depth_image)))
+
+    #     # Reshape the depth image to a 2D array of pixels
+    #     pixels = depth_image_8bit.reshape((-1, 1))
+
+    #     # Convert to float32
+    #     pixels = np.float32(pixels)
+
+    #     # Define criteria, number of clusters (K) and apply kmeans()
+    #     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
+    #     K = 2
+    #     _, labels, centers = cv2.kmeans(pixels, K, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
+
+    #     # Convert back to 8-bit values
+    #     centers = np.uint8(centers)
+
+    #     # Flatten the labels array
+    #     labels = labels.flatten()
+
+    #     # Convert all pixels to the color of the centroids
+    #     segmented_image = centers[labels]
+
+    #     # Reshape back to the original image dimension
+    #     segmented_image = segmented_image.reshape(depth_image_8bit.shape)
+
+    #     # Create a mask image with black background
+    #     mask = np.zeros_like(depth_image_8bit)
+
+    #     # Assign the foreground cluster to white (255) in the mask
+    #     foreground_cluster = np.argmax(centers)
+    #     mask[segmented_image == centers[foreground_cluster]] = 255
+
+    #     # Apply the mask to the RGB image to extract the foreground
+    #     foreground_segmented = cv2.bitwise_and(rgb_image, rgb_image, mask=mask)
+
+    #     return foreground_segmented
 
     def segment_image(self, image):
         # Create a copy of the image to avoid modifying the original
@@ -249,7 +295,6 @@ class Blocks(Node):
         # Get last image from realsense, convert to cv2
         image = self.ros2_image_to_cv2(self.last_img_msg)
         depth = self.ros2_image_to_cv2(self.last_depth_msg, encoding='8UC1')
-        print(image.shape)
 
         img_table = self.segment_depth(image, depth)
         contours, img_mask = self.segment_image(img_table)
@@ -265,7 +310,6 @@ class Blocks(Node):
         # Create marker list
         markers = request.input_markers
         markers_to_update = list(request.markers_to_update)
-        print(markers_to_update)
 
         update_scale = request.update_scale
 
@@ -283,10 +327,29 @@ class Blocks(Node):
             
             # Extract the sub-image using the contour mask
             sub_image = cv2.bitwise_and(img_table, contour_mask)
-            
-            # Crop the sub-image to the bounding box dimensions and append the sub-image to the list
-            sub_image = sub_image[y-buffer:y+h+buffer, x-buffer:x+w+buffer]
-            sub_images.append(sub_image)
+
+            # Crop the sub-image to the bounding box dimensions
+            cropped_sub_image = sub_image[max(0, y-buffer):min(y+h+buffer, sub_image.shape[0]),
+                                        max(0, x-buffer):min(x+w+buffer, sub_image.shape[1])]
+
+            # Get the dimensions of the cropped sub-image
+            sub_height, sub_width, _ = cropped_sub_image.shape
+
+            # Calculate the size of the square image
+            square_size = max(sub_height, sub_width)
+
+            # Create a new square image with black background
+            square_image = np.zeros((square_size, square_size, 3), dtype=np.uint8)
+
+            # Calculate the position to place the sub-image in the square image
+            y_pos = (square_size - sub_height) // 2
+            x_pos = (square_size - sub_width) // 2
+
+            # Place the sub-image in the center of the square image
+            square_image[y_pos:y_pos+sub_height, x_pos:x_pos+sub_width] = cropped_sub_image
+
+            # Resize the square image to 128x128 pixels
+            resized_image = cv2.resize(square_image, (128, 128))
 
             # Draw angled minimum angle rectangle
             rect = cv2.minAreaRect(contour)
@@ -388,17 +451,20 @@ class Blocks(Node):
                     # Set marker ID and add marker to array
                     marker.id = len(markers.markers)
                     markers.markers.append(marker)
+                    self.block_images.append([resized_image])
                 elif update_marker:
                     marker.id = markers.markers[similar_marker_index].id
                     markers.markers[similar_marker_index] = marker
+                    self.block_images[similar_marker_index].append(resized_image)
 
             except Exception as e:
-                self.get_logger().warn(f"Failed to transform to 'world' frame: {str(e)}")
+                self.get_logger().info(f"Failed to transform to 'world' frame: {str(e)}")
 
         self.block_markers = markers
         response.output_markers = markers
         img_with_boxes_msg = self.cv2_to_ros2_image(img_with_boxes)
         self.img_msg_out = img_with_boxes_msg
+        self.get_logger().info('Block scanning complete!')
 
         return response
 
@@ -418,7 +484,7 @@ class Blocks(Node):
 
         z = depth_array[v, u] / 1000.0  # Depth in meters
 
-        half_window = 5
+        half_window = 11
         u_min = max(0, u - half_window)
         u_max = min(depth_array.shape[1], u + half_window + 1)
         v_min = max(0, v - half_window)
@@ -532,9 +598,9 @@ class Blocks(Node):
         t_cam.header.frame_id = 'panda_hand'
         t_cam.child_frame_id = 'd405_link'
 
-        t_cam.transform.translation.x = 0.065
+        t_cam.transform.translation.x = 0.07
         t_cam.transform.translation.y = 0.0
-        t_cam.transform.translation.z = 0.04
+        t_cam.transform.translation.z = 0.045
 
         t_cam.transform.rotation.x = 0.0
         t_cam.transform.rotation.y = 0.0
@@ -559,6 +625,7 @@ class Blocks(Node):
         t_world.transform.rotation.w = 1.0
 
         self.tf_static_broadcaster.sendTransform(t_world)
+        self.get_logger().info("Published static transforms.")
 
 def main(args=None):
     """The main function."""

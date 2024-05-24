@@ -24,4 +24,7 @@ setup(
             'human_input = franka_hri.human_input:main'
         ],
     },
+    py_modules=[
+        'src/network',  
+    ],
 )
