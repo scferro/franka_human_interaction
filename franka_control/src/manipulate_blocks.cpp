@@ -1,5 +1,6 @@
 #include <chrono>
 #include <memory>
+#include <random>
 #include <thread>
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
@@ -131,20 +132,20 @@ public:
     // Call the create_collision_box function
     create_collision_box(target_pose, box_size, box_id);
       
-    // Load the robot model
-    robot_model_loader::RobotModelLoader robot_model_loader(shared_from_this(), "robot_description");
-    kinematic_model = robot_model_loader.getModel();
-    kinematic_state = std::make_shared<moveit::core::RobotState>(kinematic_model);
+    // // Load the robot model
+    // robot_model_loader::RobotModelLoader robot_model_loader(shared_from_this(), "robot_description");
+    // kinematic_model = robot_model_loader.getModel();
+    // kinematic_state = std::make_shared<moveit::core::RobotState>(kinematic_model);
 
-    // Set the joint position limits for panda_joint2
-    set_joint_limits();
+    // // Set the joint position limits for panda_joint2
+    // set_joint_limits();
   }
 
 private:
   double loop_rate;
   visualization_msgs::msg::MarkerArray block_markers;
   geometry_msgs::msg::Pose pile_0_start, pile_1_start;
-  std::vector<int> pile_0_index, pile_1_index;
+  std::vector<int> pile_0_index, pile_1_index, sorted_index;
   int human_sort_input;
 
   rclcpp_action::Server<franka_hri_interfaces::action::EmptyAction>::SharedPtr action_server_sort_blocks;
@@ -171,18 +172,18 @@ private:
     auto overhead_scan_pose = geometry_msgs::msg::PoseStamped();
     overhead_scan_pose.header.stamp = this->get_clock()->now();
     overhead_scan_pose.header.frame_id = "world";
-    overhead_scan_pose.pose.position.x = 0.3;
+    overhead_scan_pose.pose.position.x = 0.35;
     overhead_scan_pose.pose.position.y = 0.0;
-    overhead_scan_pose.pose.position.z = 0.25;
+    overhead_scan_pose.pose.position.z = 0.2;
     overhead_scan_pose.pose.orientation.x = 1.0;
     overhead_scan_pose.pose.orientation.y = 0.0;
     overhead_scan_pose.pose.orientation.z = 0.0;
     overhead_scan_pose.pose.orientation.w = 0.0;
 
     // Set planning parameters
-    double planning_time = 10.;
+    double planning_time = 20.;
     double vel_factor = 0.3;
-    double accel_factor = 0.2;
+    double accel_factor = 0.1;
 
     // Move to overhead scan pose
     move_to_pose(overhead_scan_pose, planning_time, vel_factor, accel_factor);
@@ -201,79 +202,78 @@ private:
     block_markers = result->output_markers;
 
     for (std::vector<visualization_msgs::msg::Marker>::size_type i = 0; i < (block_markers.markers.size()); i++) {
-      // Refinement scan
-      // Move above the block
-      auto refine_pose = geometry_msgs::msg::PoseStamped();
-      // Fill out the header
-      refine_pose.header.stamp = this->get_clock()->now();
-      refine_pose.header.frame_id = "world";
-      // Fill out the pose
-      refine_pose.pose.position.x = block_markers.markers[i].pose.position.x;
-      refine_pose.pose.position.y = block_markers.markers[i].pose.position.y;
-      refine_pose.pose.position.z = block_markers.markers[i].pose.position.z + 0.2;
-      // Set the orientation of the grab pose
-      refine_pose.pose.orientation.x = 1.0;
-      refine_pose.pose.orientation.y = 0.0;
-      refine_pose.pose.orientation.z = 0.0;
-      refine_pose.pose.orientation.w = 0.0;
-      vel_factor = 0.4;
-      move_to_pose(refine_pose, planning_time, vel_factor, accel_factor);
-      // Scan
-      bool update_scale = true;
-      scan_block(i, update_scale);
+      // Use std::find to check if the value is in the vector
+      auto it = std::find(sorted_index.begin(), sorted_index.end(), i);
+      bool sorted = false;
 
-      // Get label from NN
-      double pred = get_network_prediction(i);
-      RCLCPP_INFO(this->get_logger(), "Received label prediction: %f", pred);
-      int stack_id;
-      auto wait_pose = overhead_scan_pose;
-
-      // Pick up block
-      grab_block(i);
-      RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Grab complete!");
-
-      // Move to one side or the other based on prediction
-      if (pred >= 0.5) {
-        stack_id = 1;
-        refine_pose.pose.position.y = 0.2;
-      } else {
-        stack_id = 0;
-        refine_pose.pose.position.y = -0.2;
-      }
-      vel_factor = 0.6;
-      move_to_pose(refine_pose, planning_time, vel_factor, accel_factor);
-
-      // Wait for human input with a timeout
-      human_sort_input = -1;
-      auto start_time = std::chrono::steady_clock::now();
-      int timeout = 5;
-      while (human_sort_input == -1)
-      {
-          auto current_time = std::chrono::steady_clock::now();
-          auto elapsed_time = std::chrono::duration_cast<std::chrono::seconds>(current_time - start_time);
-          
-          if (elapsed_time.count() >= timeout) 
-          {
-              RCLCPP_INFO(this->get_logger(), "Timeout waiting for human input");
-              break;
-          }          
-          // // Sleep for a short duration
-          // std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      // Check if the value was found
+      if (it != sorted_index.end()) {
+          sorted = true;
       }
 
-      // Place block in stack according to feedback
-      if (human_sort_input == 0) {
-        if (stack_id==1) {
-          stack_id = 0;
-        } else if (stack_id==1) {
+      if (!sorted) { 
+        // Scan
+        bool update_scale = true;
+        scan_block(i, update_scale);
+
+        // Get label from NN
+        double pred = get_network_prediction(i);
+        RCLCPP_INFO(this->get_logger(), "Received label prediction: %f", pred);
+        int stack_id;
+        auto wait_pose = overhead_scan_pose;
+
+        // Pick up block
+        grab_block(i);
+        RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Grab complete!");
+
+        // Set sort input to -1
+        human_sort_input = -1;
+
+        // Move to one side or the other based on prediction
+        if (pred >= 0.5) {
           stack_id = 1;
+          wait_pose.pose.position.y = -0.2;
+        } else {
+          stack_id = 0;
+          wait_pose.pose.position.y = 0.2;
         }
-      }
-      // Add block to stack
-      place_in_stack(i, stack_id);
+        vel_factor = 0.6;
+        move_to_pose(wait_pose, planning_time, vel_factor, accel_factor);
 
-      // Train the network
-      train_network(i, stack_id);
+        // Wait for human input with a timeout
+        auto start_time = std::chrono::steady_clock::now();
+        int timeout = 5;
+        while (human_sort_input == -1)
+        {
+            auto current_time = std::chrono::steady_clock::now();
+            auto elapsed_time = std::chrono::duration_cast<std::chrono::seconds>(current_time - start_time);
+            
+            if (elapsed_time.count() >= timeout) 
+            {
+                RCLCPP_INFO(this->get_logger(), "Timeout waiting for human input");
+                break;
+            }          
+            // // Sleep for a short duration
+            // std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+
+        // Place block in stack according to feedback
+        RCLCPP_INFO(this->get_logger(), "Human Sorting Input: %d", human_sort_input);
+        if (human_sort_input == 0) {
+          if (stack_id==1) {
+            stack_id = 0;
+          } else if (stack_id==0) {
+            stack_id = 1;
+          }
+        }
+        // Add block to stack
+        place_in_stack(i, stack_id);
+
+        // Train the network
+        train_network(i, stack_id);
+
+        sorted_index.push_back(i);
+      }
     }
     // Move back to scan pose
     move_to_pose(overhead_scan_pose, planning_time, vel_factor, accel_factor);
@@ -300,15 +300,14 @@ private:
           }
           RCLCPP_INFO(get_logger(), "train_network service not available, waiting again...");
       }
+      // Create a new node for spinning
+      auto spin_node = std::make_shared<rclcpp::Node>("spin_node");
 
       auto result_future = train_network_client->async_send_request(request);
-      if (rclcpp::spin_until_future_complete(shared_from_this(), result_future) != rclcpp::FutureReturnCode::SUCCESS)
-      {
-          RCLCPP_ERROR(get_logger(), "Failed to call train_network service.");
-      }
+      auto timeout = std::chrono::seconds(1); // Set the desired timeout duration
   }
 
-  int get_network_prediction(int index)
+  double get_network_prediction(int index)
   {
       auto request = std::make_shared<franka_hri_interfaces::srv::SortNet::Request>();
       request->index = index;
@@ -322,15 +321,19 @@ private:
           }
           RCLCPP_INFO(get_logger(), "get_network_prediction service not available, waiting again...");
       }
+      // Create a new node for spinning
+      auto spin_node = std::make_shared<rclcpp::Node>("spin_node");
 
       auto result_future = get_network_prediction_client->async_send_request(request);
-      if (rclcpp::spin_until_future_complete(shared_from_this(), result_future) != rclcpp::FutureReturnCode::SUCCESS)
+      auto timeout = std::chrono::seconds(1); // Set the desired timeout duration
+      if (rclcpp::spin_until_future_complete(spin_node, result_future, timeout) != rclcpp::FutureReturnCode::SUCCESS)
       {
           RCLCPP_ERROR(get_logger(), "Failed to call get_network_prediction service.");
           return -1;
       }
 
       auto result = result_future.get();
+      RCLCPP_INFO(get_logger(), "Prediction: %f", result->prediction);
       return result->prediction;
   }
 
@@ -379,15 +382,18 @@ private:
       }
 
       // Calculate place height an place pose
-      double z_place = top_z + (block_markers.markers[i].scale.z / 2);
-      place_pose.position.z = z_place;
+      double z_add = (block_markers.markers[i].scale.z / 2);
+      if (z_add < 0.02) {
+        z_add = 0.02;
+      }
+      place_pose.position.z = top_z + z_add;
 
       // Place block
       place_block(place_pose, i);
 
       // // Refinement scan after placing block
-      bool update_scale = false;
-      scan_block(i, update_scale);
+      // bool update_scale = false;
+      // scan_block(i, update_scale);
     } else {
       RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Invalid stack ID, must be 0 or 1.");
     }
@@ -396,9 +402,9 @@ private:
   void place_block(geometry_msgs::msg::Pose place_pose, int marker_index)
   {
     // Set planning parameters
-    double planning_time = 10.;
+    double planning_time = 20.;
     double vel_factor = 0.8;
-    double accel_factor = 0.2;
+    double accel_factor = 0.1;
 
     // Move above top of stack
     auto hover_pose = geometry_msgs::msg::PoseStamped();
@@ -406,7 +412,7 @@ private:
     hover_pose.header.frame_id = "world";
     hover_pose.pose.position.x = place_pose.position.x;
     hover_pose.pose.position.y = place_pose.position.y;
-    hover_pose.pose.position.z = place_pose.position.z + 0.1;
+    hover_pose.pose.position.z = place_pose.position.z + 0.2;
     hover_pose.pose.orientation.x = 1.0;
     hover_pose.pose.orientation.y = 0.0;
     hover_pose.pose.orientation.z = 0.0;
@@ -416,7 +422,7 @@ private:
     // Move down to drop brick
     auto drop_pose = hover_pose;
     drop_pose.pose.position.z = place_pose.position.z + 0.025;
-    vel_factor = 0.3;
+    vel_factor = 0.1;
     move_to_pose(drop_pose, planning_time, vel_factor, accel_factor);
 
     // Open gripper
@@ -435,7 +441,9 @@ private:
     request->markers_to_update = update;
 
     // Move back to hover pose
-    move_to_pose(hover_pose, planning_time, vel_factor, accel_factor);
+    auto retreat_pose = hover_pose;
+    retreat_pose.pose.position.z += -0.05;
+    move_to_pose(retreat_pose, planning_time, vel_factor, accel_factor);
 
     // Update markers
     int count = 0;
@@ -495,7 +503,7 @@ private:
 
     double planning_time = 20.;
     double vel_factor = 0.4;
-    double accel_factor = 0.2;
+    double accel_factor = 0.1;
 
     move_to_pose(scan_pose, planning_time, vel_factor, accel_factor);
 
@@ -539,7 +547,7 @@ private:
 
     double planning_time = 20.;
     double vel_factor = 0.4;
-    double accel_factor = 0.2;
+    double accel_factor = 0.1;
 
     move_to_pose(grab_pose_1, planning_time, vel_factor, accel_factor);
     
@@ -558,7 +566,7 @@ private:
     grab_pose_2.header.stamp = this->get_clock()->now();
     grab_pose_2.pose.position.z = marker.pose.position.z + 0.03;
     if (grab_pose_2.pose.position.z < 0.05) {
-      grab_pose_2.pose.position.z = 0.05;
+      grab_pose_2.pose.position.z = 0.06;
     }
     move_to_pose(grab_pose_2, planning_time, vel_factor, accel_factor);
 
@@ -784,7 +792,7 @@ private:
 
     // Wait for the result
     auto result_future = gripper_grasping_client->async_get_result(grasp_future.get());
-    RCLCPP_INFO(get_logger(), "Grasping!");
+    RCLCPP_INFO(get_logger(), "Moving gripper!");
 
     auto timeout = std::chrono::seconds(1); // Set the desired timeout duration
     if (rclcpp::spin_until_future_complete(spin_node, result_future, timeout) !=

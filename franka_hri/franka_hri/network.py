@@ -20,8 +20,8 @@ class SortingNet(nn.Module):
         self.sigmoid = nn.Sigmoid()
 
         # Learning rate
-        self.lr_init = 0.1
-        self.lr_decay = 0.9
+        self.lr_init = 0.00001
+        self.lr_decay = 0.98
 
         # Create optimizer and criterion
         self.criterion = nn.BCELoss()
@@ -42,22 +42,23 @@ class SortingNet(nn.Module):
         x = self.sigmoid(x)
         return x
 
-    def train_network(self, image, label):
-        # Convert the label to a tensor
-        label = torch.tensor([label], dtype=torch.float32)
-
+    def train_network(self, images, label_tensors):
+        for i in range(len(images)):
         # Clear the gradients
-        self.optimizer.zero_grad()
+            self.optimizer.zero_grad()
 
-        # Forward pass
-        output = self.forward(image)
+            image = images[i]
+            label_tensor = label_tensors[i]
 
-        # Calculate the loss
-        loss = self.criterion(output, label)
+            # Forward pass
+            output = self.forward(image)
 
-        # Backward pass and optimization
-        loss.backward()
-        self.optimizer.step()
+            # Calculate the loss
+            loss = self.criterion(output, label_tensor)
+
+            # Backward pass and optimization
+            loss.backward()
+            self.optimizer.step()
 
         # Update learning rate for next iteration
         self.scheduler.step()

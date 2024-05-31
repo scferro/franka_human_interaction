@@ -21,6 +21,9 @@ from tf2_geometry_msgs.tf2_geometry_msgs import do_transform_point
 
 from franka_hri.network import SortingNet
 import torchvision.transforms as transforms
+import torch
+from datetime import datetime
+import random
 
 class Blocks(Node):
     def __init__(self):
@@ -90,6 +93,8 @@ class Blocks(Node):
         self.fy = None
         self.cx = None
         self.cy = None
+        self.image_tensors = []
+        self.label_tensors = []
 
     def train_network_callback(self, request, response):
         # Get block index and label from message
@@ -98,11 +103,30 @@ class Blocks(Node):
 
         # Get images of block
         images = self.block_images[block_index]
+        
+        filepath = "/home/scferro/Documents/final_project/training_images/"
 
         # Train the network using the images
         for img in images:
-            tensor = self.preprocess_image(img)
-            self.network.train_network(tensor, label)
+            # Generate the current time as a string
+            current_time = datetime.now().strftime("%Y%m%d_%H%M%S%f")
+            # Construct the filename with the current time
+            filename = f'image_{current_time}.png'  
+            cv2.imwrite(filepath+filename, img)
+            transformed_images = self.transform_image(img)
+            for img_tf in transformed_images:
+                img_tensor = self.preprocess_image(img_tf)
+                label_tensor = torch.tensor([[label]], dtype=torch.float32)
+                self.image_tensors.append(img_tensor)
+                self.label_tensors.append(label_tensor)
+
+        # Limit length of lists to 100 items
+        if len(self.image_tensors) > 100:
+            self.image_tensors = self.image_tensors[-100:-1]
+            self.label_tensors = self.label_tensors[-100:-1]
+
+        self.network.train_network(self.image_tensors, self.label_tensors)
+        self.get_logger().info("Trained network.")
 
         return response
 
@@ -113,15 +137,16 @@ class Blocks(Node):
         # Get images of block
         images = self.block_images[block_index]
 
-        # Get prediction for each image in the network
+        # Get prediction for each image of the block
         pred_list = []
         for img in images:
-            tensor = self.preprocess_image(img)
-            pred = self.network.forward(tensor)
-            pred_list.append(pred)
+            img_tensor = self.preprocess_image(img)
+            pred = self.network.forward(img_tensor)
+            pred_list.append(pred.detach().numpy()) 
 
         # Return average prediction for the images
-        response = np.mean(pred_list)
+        response.prediction = float(np.mean(pred_list)) 
+        self.get_logger().info(f"Prediction: {float(np.mean(pred_list)) }")
         return response
 
     def preprocess_image(self, image):
@@ -212,47 +237,6 @@ class Blocks(Node):
 
         return table_segmented
 
-    # def segment_depth(self, rgb_image, depth_image):
-    #     h, w = depth_image.shape
-
-    #     # Convert depth image to 8-bit for processing
-    #     depth_image_8bit = cv2.convertScaleAbs(depth_image, alpha=255.0 / (np.max(depth_image) - np.min(depth_image)))
-
-    #     # Reshape the depth image to a 2D array of pixels
-    #     pixels = depth_image_8bit.reshape((-1, 1))
-
-    #     # Convert to float32
-    #     pixels = np.float32(pixels)
-
-    #     # Define criteria, number of clusters (K) and apply kmeans()
-    #     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
-    #     K = 2
-    #     _, labels, centers = cv2.kmeans(pixels, K, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
-
-    #     # Convert back to 8-bit values
-    #     centers = np.uint8(centers)
-
-    #     # Flatten the labels array
-    #     labels = labels.flatten()
-
-    #     # Convert all pixels to the color of the centroids
-    #     segmented_image = centers[labels]
-
-    #     # Reshape back to the original image dimension
-    #     segmented_image = segmented_image.reshape(depth_image_8bit.shape)
-
-    #     # Create a mask image with black background
-    #     mask = np.zeros_like(depth_image_8bit)
-
-    #     # Assign the foreground cluster to white (255) in the mask
-    #     foreground_cluster = np.argmax(centers)
-    #     mask[segmented_image == centers[foreground_cluster]] = 255
-
-    #     # Apply the mask to the RGB image to extract the foreground
-    #     foreground_segmented = cv2.bitwise_and(rgb_image, rgb_image, mask=mask)
-
-    #     return foreground_segmented
-
     def segment_image(self, image):
         # Create a copy of the image to avoid modifying the original
         img_copy = image.copy()
@@ -261,8 +245,8 @@ class Blocks(Node):
         hsv_image = cv2.cvtColor(img_copy, cv2.COLOR_BGR2HSV)
 
         # Define the color range for the objects you want to segment (adjust as needed)
-        lower_color = np.array([0, 50, 50])   # Example: Lower range for colors
-        upper_color = np.array([180, 255, 255])   # Example: Upper range for colors
+        lower_color = np.array([0, 100, 80])  
+        upper_color = np.array([180, 255, 255]) 
 
         # Create a binary mask based on the color range
         mask = cv2.inRange(hsv_image, lower_color, upper_color)
@@ -293,7 +277,7 @@ class Blocks(Node):
             return
         
         # Get last image from realsense, convert to cv2
-        image = self.ros2_image_to_cv2(self.last_img_msg)
+        image = self.ros2_image_to_cv2(self.last_img_msg, encoding='bgr8')
         depth = self.ros2_image_to_cv2(self.last_depth_msg, encoding='8UC1')
 
         img_table = self.segment_depth(image, depth)
@@ -431,9 +415,9 @@ class Blocks(Node):
 
                 # Set the box color
                 avg_color = self.get_average_color(img_mask, contour)
-                marker.color.r = avg_color[0] / 255
+                marker.color.r = avg_color[2] / 255
                 marker.color.g = avg_color[1] / 255
-                marker.color.b = avg_color[2] / 255
+                marker.color.b = avg_color[0] / 255
                 marker.color.a = 1.0
 
                 # Check if the marker has already been scanned
@@ -600,7 +584,7 @@ class Blocks(Node):
 
         t_cam.transform.translation.x = 0.07
         t_cam.transform.translation.y = 0.0
-        t_cam.transform.translation.z = 0.045
+        t_cam.transform.translation.z = 0.05
 
         t_cam.transform.rotation.x = 0.0
         t_cam.transform.rotation.y = 0.0
@@ -626,6 +610,27 @@ class Blocks(Node):
 
         self.tf_static_broadcaster.sendTransform(t_world)
         self.get_logger().info("Published static transforms.")
+
+    def transform_image(self, image):
+        height, width = image.shape[:2]
+
+        def rotate_image(image, angle):
+            M = cv2.getRotationMatrix2D((width // 2, height // 2), angle, 1)
+            return cv2.warpAffine(image, M, (width, height))
+
+        def mirror_image(image):
+            return cv2.flip(image, 1)
+
+        transformations = []
+        
+        for angle in [0, 90, 180, 270]:
+            rotated_image = rotate_image(image, angle)
+            mirrored_image = mirror_image(rotated_image)
+            for img in [rotated_image, mirrored_image]:
+                transformations.append(img)
+
+        return transformations
+
 
 def main(args=None):
     """The main function."""

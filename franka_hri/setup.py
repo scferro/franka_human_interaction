@@ -25,6 +25,6 @@ setup(
         ],
     },
     py_modules=[
-        'src/network',  
+        'franka_hri/network',  
     ],
 )
