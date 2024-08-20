@@ -1,6 +1,3 @@
-Certainly! I'll add comments to the code to explain its functionality. Here's the fully commented version:
-
-```python
 """
 Blocks node for object detection and manipulation.
 
