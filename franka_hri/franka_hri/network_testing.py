@@ -77,17 +77,22 @@ def preprocess_image(image):
 
     return image_tensor
 
+# Set the device to CUDA if available
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 # Load the SortingNet network
-network = SortingNet()
+network = SortingNet().to(device)
 
 # Specify the path to the folder containing images
 folder_path = "/home/scferro/Documents/final_project/training_images"
 
 image_tensors = []
 label_tensors = []
+count = 0
 
 # Main training loop
 while True:
+    print(f"Image: {count}")
     # Load a random image from the folder
     random_image = load_random_image(folder_path)
 
@@ -96,7 +101,7 @@ while True:
     cv2.waitKey(0)  # Wait for a key press to close the image window
 
     # Create tensor
-    random_image_tensor = preprocess_image(random_image)
+    random_image_tensor = preprocess_image(random_image).to(device)
     
     # Apply transformations to the image
     transformed_images = transform_image(random_image)
@@ -119,17 +124,19 @@ while True:
     # Close the image window
     cv2.destroyAllWindows()
 
-    # Convert to tensors
+    # Convert to tensors and send to device
     for img_tf in transformed_images:
-        img_tensor = preprocess_image(img_tf)
-        label_tensor = torch.tensor([[label]], dtype=torch.float32)
+        img_tensor = preprocess_image(img_tf).to(device)
+        label_tensor = torch.tensor([[label]], dtype=torch.float32).to(device)
         image_tensors.append(img_tensor)
         label_tensors.append(label_tensor)
 
     # Limit length of lists to 100 items
-    if len(image_tensors) > 100:
+    if len(image_tensors) > 200:
         image_tensors = image_tensors[-100:]
         label_tensors = label_tensors[-100:]
     
     # Train the network with the image and user-provided label
     network.train_network(image_tensors, label_tensors)
+
+    count += 1

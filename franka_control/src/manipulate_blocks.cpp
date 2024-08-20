@@ -12,6 +12,7 @@
 #include <franka_msgs/action/grasp.hpp>
 #include <franka_msgs/action/homing.hpp>
 #include <std_msgs/msg/int8.hpp>
+#include <std_srvs/srv/empty.hpp>
 
 #include <tf2_ros/transform_listener.h>
 #include <geometry_msgs/msg/transform_stamped.hpp>
@@ -46,6 +47,10 @@ public:
       std::bind(&ManipulateBlocks::handle_accepted, this, std::placeholders::_1)
     );
 
+    // Create a service for pretraining the network
+    pretrain_franka_srv = this->create_service<std_srvs::srv::Empty>("pretrain_franka",
+            std::bind(&ManipulateBlocks::pretrain_franka_callback, this, std::placeholders::_1, std::placeholders::_2));
+
     // Create a client for the overhead scanning service
     scan_overhead_cli = this->create_client<franka_hri_interfaces::srv::UpdateMarkers>("scan_overhead");
 
@@ -69,6 +74,7 @@ public:
     // Create clients for the neural net services
     train_network_client = create_client<franka_hri_interfaces::srv::SortNet>("train_network");
     get_network_prediction_client = create_client<franka_hri_interfaces::srv::SortNet>("get_network_prediction");
+    pretrain_network_client = create_client<std_srvs::srv::Empty>("pretrain_network");
 
     // Create action clients for the gripper
     gripper_homing_client = rclcpp_action::create_client<franka_msgs::action::Homing>(this, "panda_gripper/homing");
@@ -159,12 +165,50 @@ private:
   rclcpp::Client<franka_hri_interfaces::srv::UpdateMarkers>::SharedPtr update_markers_cli;
   rclcpp::Client<franka_hri_interfaces::srv::SortNet>::SharedPtr train_network_client;
   rclcpp::Client<franka_hri_interfaces::srv::SortNet>::SharedPtr get_network_prediction_client;
+  rclcpp::Client<std_srvs::srv::Empty>::SharedPtr pretrain_network_client;
   rclcpp::Subscription<std_msgs::msg::Int8>::SharedPtr human_sorting_sub;
+  rclcpp::Service<std_srvs::srv::Empty>::SharedPtr pretrain_franka_srv;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr block_pub;
   std::shared_ptr<tf2_ros::Buffer> tfBuffer;
   std::shared_ptr<tf2_ros::TransformListener> tfListener;
   std::shared_ptr<moveit::core::RobotModel> kinematic_model;
   std::shared_ptr<moveit::core::RobotState> kinematic_state;
+
+
+  void pretrain_franka_callback(const std::shared_ptr<std_srvs::srv::Empty::Request> request,
+                        std::shared_ptr<std_srvs::srv::Empty::Response> response)
+  {
+    // Create overhead scan pose
+    auto overhead_scan_pose = geometry_msgs::msg::PoseStamped();
+    overhead_scan_pose.header.stamp = this->get_clock()->now();
+    overhead_scan_pose.header.frame_id = "world";
+    overhead_scan_pose.pose.position.x = 0.35;
+    overhead_scan_pose.pose.position.y = 0.0;
+    overhead_scan_pose.pose.position.z = 0.3;
+    overhead_scan_pose.pose.orientation.x = 1.0;
+    overhead_scan_pose.pose.orientation.y = 0.0;
+    overhead_scan_pose.pose.orientation.z = 0.0;
+    overhead_scan_pose.pose.orientation.w = 0.0;
+
+    // Set planning parameters
+    double planning_time = 20.;
+    double vel_factor = 0.3;
+    double accel_factor = 0.1;
+
+    // Move to overhead scan pose
+    move_to_pose(overhead_scan_pose, planning_time, vel_factor, accel_factor);
+
+    // Perform scan for blocks
+    auto request_out = std::make_shared<std_srvs::srv::Empty::Request>();
+    if (!pretrain_network_client->wait_for_service(1s)) {
+        RCLCPP_WARN(rclcpp::get_logger("rclcpp"), "Pretrain network service not available, proceeding without waiting.");
+    } else {
+        auto future = pretrain_network_client->async_send_request(request_out);
+        // No need to wait for the response
+    }
+
+    RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Pre-training initiated.");
+  }
 
   void sort_blocks(const std::shared_ptr<rclcpp_action::ServerGoalHandle<franka_hri_interfaces::action::EmptyAction>> goal_handle)
   {
@@ -240,29 +284,37 @@ private:
         vel_factor = 0.6;
         move_to_pose(wait_pose, planning_time, vel_factor, accel_factor);
 
-        // Wait for human input with a timeout
-        auto start_time = std::chrono::steady_clock::now();
-        int timeout = 5;
-        while (human_sort_input == -1)
-        {
-            auto current_time = std::chrono::steady_clock::now();
-            auto elapsed_time = std::chrono::duration_cast<std::chrono::seconds>(current_time - start_time);
-            
-            if (elapsed_time.count() >= timeout) 
-            {
-                RCLCPP_INFO(this->get_logger(), "Timeout waiting for human input");
-                break;
-            }          
-            // // Sleep for a short duration
-            // std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-
-        // Place block in stack according to feedback
-        RCLCPP_INFO(this->get_logger(), "Human Sorting Input: %d", human_sort_input);
-        if (human_sort_input == 0) {
-          if (stack_id==1) {
+        // Check if result is within high confidence threshold
+        double hi_conf_thresh = 0.15;
+        
+        if ((pred > hi_conf_thresh) && (pred < (1. - hi_conf_thresh))) {
+          // Wait for human input with a timeout
+          auto start_time = std::chrono::steady_clock::now();
+          int timeout = 5;
+          while (human_sort_input == -1)
+          {
+              auto current_time = std::chrono::steady_clock::now();
+              auto elapsed_time = std::chrono::duration_cast<std::chrono::seconds>(current_time - start_time);
+              
+              if (elapsed_time.count() >= timeout) 
+              {
+                  RCLCPP_INFO(this->get_logger(), "Timeout waiting for human input");
+                  break;
+              }          
+          }
+          // Place block in stack according to feedback
+          RCLCPP_INFO(this->get_logger(), "Human Sorting Input: %d", human_sort_input);
+          if (human_sort_input == 0) {
+            if (stack_id==1) {
+              stack_id = 0;
+            } else if (stack_id==0) {
+              stack_id = 1;
+            }
+          }
+        } else {
+          if (pred < 0.5) {
             stack_id = 0;
-          } else if (stack_id==0) {
+          } else {
             stack_id = 1;
           }
         }
@@ -362,7 +414,6 @@ private:
           top_z = 0.;
         }
         place_pose = pile_0_start;
-        pile_0_index.push_back(i);
       } else if (stack_id==1) {
         // Check if stack is over max height
         if (pile_1_index.size() >= static_cast<std::vector<int>::size_type>(max_blocks)){
@@ -378,7 +429,6 @@ private:
           top_z = 0.;
         }
         place_pose = pile_1_start;
-        pile_1_index.push_back(i);
       }
 
       // Calculate place height an place pose
@@ -388,12 +438,72 @@ private:
       }
       place_pose.position.z = top_z + z_add;
 
+      // Move above top of stack
+      auto hover_pose = geometry_msgs::msg::PoseStamped();
+      hover_pose.header.stamp = this->get_clock()->now();
+      hover_pose.header.frame_id = "world";
+      hover_pose.pose.position.x = place_pose.position.x;
+      hover_pose.pose.position.y = place_pose.position.y;
+      hover_pose.pose.position.z = place_pose.position.z + 0.15;
+      hover_pose.pose.orientation.x = 1.0;
+      hover_pose.pose.orientation.y = 0.0;
+      hover_pose.pose.orientation.z = 0.0;
+      hover_pose.pose.orientation.w = 0.0;
+      double planning_time = 10.;
+      double vel_factor = 0.4;
+      double accel_factor = 0.1;
+      move_to_pose(hover_pose, planning_time, vel_factor, accel_factor);
+
+      // Remove collision objects for placing
+      if (stack_id==0) {
+        // Iterate through each item in the pile_0_index vector
+        for (int j = 0; j < pile_0_index.size(); ++j) {
+            int id = pile_0_index[j];
+            // Remove collision objects
+            std::string id_string = std::to_string(id);
+            auto block_id = std_msgs::msg::String();
+            block_id.data = id_string;
+            remove_collision_box(block_id);
+        }
+        pile_0_index.push_back(i);
+      } else if (stack_id==1) {
+        // Iterate through each item in the pile_1_index vector
+        for (int j = 0; j < pile_1_index.size(); ++j) {
+            int id = pile_1_index[j];
+            // Remove collision objects
+            std::string id_string = std::to_string(id);
+            auto block_id = std_msgs::msg::String();
+            block_id.data = id_string;
+            remove_collision_box(block_id);
+        }
+        pile_1_index.push_back(i);
+      }
+
       // Place block
       place_block(place_pose, i);
 
-      // // Refinement scan after placing block
-      // bool update_scale = false;
-      // scan_block(i, update_scale);
+      // Add collision objects back in for placing
+      if (stack_id==0) {
+        // Iterate through each item in the pile_0_index vector
+        for (int j = 0; j < pile_0_index.size(); ++j) {
+            int id = pile_0_index[j];
+            // Remove collision objects
+            std::string id_string = std::to_string(id);
+            auto block_id = std_msgs::msg::String();
+            block_id.data = id_string;
+            create_collision_box(block_markers.markers[id].pose, block_markers.markers[id].scale, block_id);
+        }
+      } else if (stack_id==1) {
+        // Iterate through each item in the pile_1_index vector
+        for (int j = 0; j < pile_1_index.size(); ++j) {
+            int id = pile_1_index[j];
+            // Remove collision objects
+            std::string id_string = std::to_string(id);
+            auto block_id = std_msgs::msg::String();
+            block_id.data = id_string;
+            create_collision_box(block_markers.markers[id].pose, block_markers.markers[id].scale, block_id);
+        }
+      }
     } else {
       RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Invalid stack ID, must be 0 or 1.");
     }
@@ -403,26 +513,22 @@ private:
   {
     // Set planning parameters
     double planning_time = 20.;
-    double vel_factor = 0.8;
+    double vel_factor = 0.1;
     double accel_factor = 0.1;
 
     // Move above top of stack
-    auto hover_pose = geometry_msgs::msg::PoseStamped();
-    hover_pose.header.stamp = this->get_clock()->now();
-    hover_pose.header.frame_id = "world";
-    hover_pose.pose.position.x = place_pose.position.x;
-    hover_pose.pose.position.y = place_pose.position.y;
-    hover_pose.pose.position.z = place_pose.position.z + 0.2;
-    hover_pose.pose.orientation.x = 1.0;
-    hover_pose.pose.orientation.y = 0.0;
-    hover_pose.pose.orientation.z = 0.0;
-    hover_pose.pose.orientation.w = 0.0;
-    move_to_pose(hover_pose, planning_time, vel_factor, accel_factor);
+    auto drop_pose = geometry_msgs::msg::PoseStamped();
+    drop_pose.header.stamp = this->get_clock()->now();
+    drop_pose.header.frame_id = "world";
+    drop_pose.pose.position.x = place_pose.position.x;
+    drop_pose.pose.position.y = place_pose.position.y;
+    drop_pose.pose.position.z = place_pose.position.z + 0.03;
+    drop_pose.pose.orientation.x = 1.0;
+    drop_pose.pose.orientation.y = 0.0;
+    drop_pose.pose.orientation.z = 0.0;
+    drop_pose.pose.orientation.w = 0.0;
 
     // Move down to drop brick
-    auto drop_pose = hover_pose;
-    drop_pose.pose.position.z = place_pose.position.z + 0.025;
-    vel_factor = 0.1;
     move_to_pose(drop_pose, planning_time, vel_factor, accel_factor);
 
     // Open gripper
@@ -441,8 +547,8 @@ private:
     request->markers_to_update = update;
 
     // Move back to hover pose
-    auto retreat_pose = hover_pose;
-    retreat_pose.pose.position.z += -0.05;
+    auto retreat_pose = drop_pose;
+    retreat_pose.pose.position.z += 0.15;
     move_to_pose(retreat_pose, planning_time, vel_factor, accel_factor);
 
     // Update markers
@@ -454,15 +560,6 @@ private:
     auto future = update_markers_cli->async_send_request(request);
     auto result = future.get();
     block_markers = result->output_markers;
-
-    // Create collision object to represent block
-    // Create the box ID
-    std_msgs::msg::String box_id;
-    box_id.data = std::to_string(marker_index);
-
-    // Call the create_collision_box function
-    // detach_collision_object_from_gripper();
-    create_collision_box(marker.pose, marker.scale, box_id);
   }
 
   void scan_block(int i, bool update_scale)
@@ -550,15 +647,6 @@ private:
     double accel_factor = 0.1;
 
     move_to_pose(grab_pose_1, planning_time, vel_factor, accel_factor);
-    
-    // // Attach collision object to gripper
-    // // Create the box ID
-    // std_msgs::msg::String box_id;
-    // box_id.data = std::to_string(i);
-
-    // // Call the attach_collision_object_to_gripper function
-    // remove_collision_box(box_id);
-    // // attach_collision_object_to_gripper(marker.scale);
 
     // Grab the block
     auto grab_pose_2 = grab_pose_1;

@@ -24,6 +24,7 @@ import torchvision.transforms as transforms
 import torch
 from datetime import datetime
 import random
+from sklearn.linear_model import RANSACRegressor
 
 class Blocks(Node):
     def __init__(self):
@@ -58,6 +59,12 @@ class Blocks(Node):
 
         # Create update_marker service
         self.update_markers_srv = self.create_service(UpdateMarkers, 'update_markers', self.update_markers_callback)
+
+        # Create pre train blocks service
+        self.pretrain_network_srv = self.create_service(Empty, 'pretrain_network', self.pretrain_network_callback)
+
+        # Create reset blocks service
+        self.reset_blocks_srv = self.create_service(Empty, 'reset_blocks', self.reset_blocks_callback)
 
         # Create the nn object and prediction and training services
         self.network = SortingNet()
@@ -96,6 +103,62 @@ class Blocks(Node):
         self.image_tensors = []
         self.label_tensors = []
 
+    def pretrain_network_callback(self, request, response):
+        self.block_markers = MarkerArray()
+        self.block_images = []
+        self.image_tensors = []
+        self.label_tensors = []
+
+        marker_array, img_with_boxes = self.scan_overhead(self.block_markers, [], True)
+
+        img_with_boxes_msg = self.cv2_to_ros2_image(img_with_boxes)
+        self.img_msg_out = img_with_boxes_msg
+
+        markers = marker_array.markers
+
+        for i in range(len(markers)):
+            marker = markers[i]
+            # Get images of block
+            images = self.block_images[i]
+            
+            filepath = "/home/scferro/Documents/final_project/training_images/"
+
+            label = 0
+            if marker.pose.position.y < 0:
+                label = 1
+
+            # Train the network using the images
+            for img in images:
+                # Generate the current time as a string
+                current_time = datetime.now().strftime("%Y%m%d_%H%M%S%f")
+                # Construct the filename with the current time
+                filename = f'image_{current_time}.png'  
+                cv2.imwrite(filepath+filename, img)
+                transformed_images = self.transform_image(img)
+                for img_tf in transformed_images:
+                    img_tensor = self.preprocess_image(img_tf)
+                    label_tensor = torch.tensor([[label]], dtype=torch.float32)
+                    self.image_tensors.append(img_tensor)
+                    self.label_tensors.append(label_tensor)
+        
+        iterations = 10
+        for i in range(iterations):
+            self.network.train_network(self.image_tensors, self.label_tensors)
+
+        self.get_logger().info("Pre-trained network.")
+        self.block_images = []
+        self.block_markers = MarkerArray()
+        return response
+
+
+    def reset_blocks_callback(self, request, response):
+        self.block_markers = MarkerArray()
+        self.block_images = []
+        self.image_tensors = []
+        self.label_tensors = []
+    
+        return response
+
     def train_network_callback(self, request, response):
         # Get block index and label from message
         block_index = request.index
@@ -120,8 +183,9 @@ class Blocks(Node):
                 self.image_tensors.append(img_tensor)
                 self.label_tensors.append(label_tensor)
 
-        # Limit length of lists to 100 items
-        if len(self.image_tensors) > 100:
+        # Limit length of lists to max_images items
+        max_images = 50
+        if len(self.image_tensors) > max_images:
             self.image_tensors = self.image_tensors[-100:-1]
             self.label_tensors = self.label_tensors[-100:-1]
 
@@ -196,7 +260,7 @@ class Blocks(Node):
         edges = cv2.Canny(blur, 30, 150)
 
         # Apply Hough Transform to detect lines
-        lines = cv2.HoughLines(edges, 1, np.pi / 180, 80)
+        lines = cv2.HoughLines(edges, 1, np.pi / 180, 85)
 
         # Create a mask image with black background
         mask = np.zeros_like(depth_image_8bit)
@@ -272,10 +336,21 @@ class Blocks(Node):
         return contours_out, masked_image
 
     def scan_overhead_callback(self, request, response):
-        """Function to scan table to determine approximate size and position of blocks."""
         if self.last_img_msg is None:
             return
         
+        markers, img_with_boxes = self.scan_overhead(request.input_markers, list(request.markers_to_update), request.update_scale)
+
+        self.block_markers = markers
+        response.output_markers = markers
+        img_with_boxes_msg = self.cv2_to_ros2_image(img_with_boxes)
+        self.img_msg_out = img_with_boxes_msg
+        self.get_logger().info('Block scanning complete!')
+
+        return response
+
+    def scan_overhead(self, markers, markers_to_update, update_scale):
+        """Function to scan table to determine approximate size and position of blocks."""
         # Get last image from realsense, convert to cv2
         image = self.ros2_image_to_cv2(self.last_img_msg, encoding='bgr8')
         depth = self.ros2_image_to_cv2(self.last_depth_msg, encoding='8UC1')
@@ -286,16 +361,7 @@ class Blocks(Node):
         # Create a copy of the original image to draw boxes on
         img_with_boxes = img_mask.copy()
 
-        # List to store the sub-images
-        sub_images = []
-
         buffer = 5
-
-        # Create marker list
-        markers = request.input_markers
-        markers_to_update = list(request.markers_to_update)
-
-        update_scale = request.update_scale
 
         # Iterate through each contour
         for contour in contours:
@@ -355,12 +421,13 @@ class Blocks(Node):
             # Get box center in 3d space
             center_x = int(box_center[0])
             center_y = int(box_center[1])
-            center_3d = self.get_position_from_image(center_x, center_y, self.last_depth_msg)
+            depth_cv_image = self.ros2_image_to_cv2(self.last_depth_msg)
+            center_3d = self.get_position_from_image(center_x, center_y, depth_cv_image)
 
             # Get 3d points for box edges
             points_3d = []
             for point in box:
-                pt_3d = self.get_position_from_image(point[0], point[1], self.last_depth_msg)
+                pt_3d = self.get_position_from_image(point[0], point[1], depth_cv_image)
                 points_3d.append(pt_3d)
 
             # Extract box side lengths
@@ -371,9 +438,6 @@ class Blocks(Node):
 
             side1_length = (side_lengths[0] + side_lengths[2]) / 2
             side2_length = (side_lengths[1] + side_lengths[3]) / 2
-
-            # Get the top position of the box
-            appx_height = self.get_depth_percentile(depth, contour)
 
             marker = Marker()
             marker.header.frame_id = "world"
@@ -412,6 +476,9 @@ class Blocks(Node):
                 marker.scale.x = max(side1_length, side2_length)
                 marker.scale.y = min(side1_length, side2_length)
                 marker.scale.z = world_point.point.z
+                # If Z is very large, assume it is the same as Y
+                if marker.scale.z > 2 * marker.scale.y:
+                    marker.scale.z = marker.scale.y
 
                 # Set the box color
                 avg_color = self.get_average_color(img_mask, contour)
@@ -444,22 +511,15 @@ class Blocks(Node):
             except Exception as e:
                 self.get_logger().info(f"Failed to transform to 'world' frame: {str(e)}")
 
-        self.block_markers = markers
-        response.output_markers = markers
-        img_with_boxes_msg = self.cv2_to_ros2_image(img_with_boxes)
-        self.img_msg_out = img_with_boxes_msg
-        self.get_logger().info('Block scanning complete!')
+        return markers, img_with_boxes
 
-        return response
-
-    def get_position_from_image(self, u, v, depth_msg):
+    def get_position_from_image(self, u, v, depth_cv_image):
         """Retrieve the 3D coordinates based on the depth image data."""
         if self.fx is None or self.fy is None or self.cx is None or self.cy is None:
             self.get_logger().warn('Camera info not yet received.')
             return
 
         # Convert the depth image to a Numpy array
-        depth_cv_image = self.ros2_image_to_cv2(depth_msg)
         depth_array = np.array(depth_cv_image, dtype=np.float32)
         depth_height, depth_width = depth_array.shape
 
