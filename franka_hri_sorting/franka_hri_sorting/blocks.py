@@ -43,7 +43,7 @@ import tf_transformations
 from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
 from tf2_ros import TransformBroadcaster, Buffer, TransformListener
 from tf2_geometry_msgs.tf2_geometry_msgs import do_transform_point
-from franka_hri.network import SortingNet
+from franka_hri_sorting.network import SortingNet
 import torchvision.transforms as transforms
 import torch
 from datetime import datetime

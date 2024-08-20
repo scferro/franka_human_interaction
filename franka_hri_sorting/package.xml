@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>franka_hri</name>
+  <name>franka_hri_sorting</name>
   <version>0.0.0</version>
   <description>A package for managing human interactions </description>
   <maintainer email="stephencferro@gmail.com">scferro</maintainer>

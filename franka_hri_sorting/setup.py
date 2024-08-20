@@ -1,7 +1,7 @@
 from setuptools import find_packages, setup
 import glob
 
-package_name = 'franka_hri'
+package_name = 'franka_hri_sorting'
 
 setup(
     name=package_name,
@@ -20,8 +20,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'blocks = franka_hri.blocks:main',
-            'human_input = franka_hri.human_input:main'
+            'blocks = franka_hri_sorting.blocks:main',
+            'human_input = franka_hri_sorting.human_input:main'
         ],
     },
     py_modules=[
