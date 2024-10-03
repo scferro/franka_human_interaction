@@ -43,9 +43,6 @@ from tf2_geometry_msgs.tf2_geometry_msgs import do_transform_point
 from franka_hri_sorting.network import SortingNet
 import torchvision.transforms as transforms
 import torch
-from datetime import datetime
-import random
-from sklearn.linear_model import RANSACRegressor
 
 class Blocks(Node):
     def __init__(self):

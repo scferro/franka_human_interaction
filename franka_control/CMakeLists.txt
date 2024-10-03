@@ -14,6 +14,9 @@ find_package(franka_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(franka_hri_interfaces REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(moveit_core REQUIRED)
+find_package(moveit_ros_planning REQUIRED)
 
 # Include directories
 include_directories(include)
@@ -47,10 +50,21 @@ ament_target_dependencies(manipulate_blocks
   franka_hri_interfaces
 )
 
+# Create the joy_to_moveit_servo executable
+add_executable(joy_to_moveit_servo src/joy_to_moveit_servo.cpp)
+ament_target_dependencies(joy_to_moveit_servo
+  rclcpp
+  sensor_msgs
+  geometry_msgs
+  moveit_core
+  moveit_ros_planning_interface
+)
+
 # Install targets
 install(TARGETS
   franka_control
   manipulate_blocks
+  joy_to_moveit_servo
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}
@@ -59,6 +73,12 @@ install(TARGETS
 # Install include directory
 install(DIRECTORY include/
   DESTINATION include/
+)
+
+# Install launch files
+install(DIRECTORY
+  launch
+  DESTINATION share/${PROJECT_NAME}/
 )
 
 ament_package()

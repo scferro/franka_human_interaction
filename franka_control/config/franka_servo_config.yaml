@@ -1,0 +1,54 @@
+publish_period: 0.008
+low_pass_filter_coeff: 2.0
+
+# Joints
+joint_topic: "/joint_states"
+move_group_name: "panda_arm"  # or your specific move group name
+planning_frame: "panda_link0"  # or your robot's base link
+
+# Command in
+cartesian_command_in_topic: "/servo_server/delta_twist_cmds"
+joint_command_in_topic: "/servo_server/delta_joint_cmds"
+
+# EEF
+ee_frame_name: "panda_hand"  # or your end effector frame
+robot_link_command_frame: "panda_hand"
+
+# Collision checking
+check_collisions: true
+collision_check_rate: 10.0
+self_collision_proximity_threshold: 0.01
+scene_collision_proximity_threshold: 0.02
+
+# Incoming commands
+command_in_type: "speed_units"  # Try "unitless", "speed_units", "angle_units"
+scale:
+  linear: 0.003
+  rotational: 0.005
+  joint: 0.01
+
+# Velocity limits
+cartesian_velocity_limits:
+  linear: 0.5
+  rotational: 1.0
+joint_velocity_limits:
+  - 1.5
+  - 1.5
+  - 1.5
+  - 1.5
+  - 2.5
+  - 2.5
+  - 2.5
+
+# Acceleration limits
+cartesian_acceleration_limits:
+  linear: 2.0
+  rotational: 2.0
+joint_acceleration_limits:
+  - 2.5
+  - 2.5
+  - 2.5
+  - 2.5
+  - 5.0
+  - 5.0
+  - 5.0

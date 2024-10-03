@@ -3,28 +3,26 @@
 <package format="3">
   <name>franka_control</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>Package for controlling Franka robots and integrating with MoveIt Servo</description>
   <maintainer email="stephencferro@gmail.com">scferro</maintainer>
   <license>TODO: License declaration</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
+  <depend>rclcpp</depend>
+  <depend>rclcpp_action</depend>
+  <depend>moveit_ros_planning_interface</depend>
+  <depend>franka_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>franka_hri_interfaces</depend>
+  <depend>sensor_msgs</depend>
+  <depend>moveit_core</depend>
+  <depend>moveit_ros_planning</depend>
+  <depend>std_msgs</depend>
+
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
-
-  <build_depend>franka_hri_interfaces</build_depend>
-  <exec_depend>franka_hri_interfaces</exec_depend>
-
-  <buildtool_depend>ament_cmake</buildtool_depend>
-  <build_depend>rclcpp</build_depend>
-  <build_depend>rclcpp_action</build_depend>
-  <build_depend>franka_msgs</build_depend>
-  <build_depend>std_msgs</build_depend>
-
-  <exec_depend>rclcpp</exec_depend>
-  <exec_depend>rclcpp_action</exec_depend>
-  <exec_depend>franka_msgs</exec_depend>
-  <exec_depend>std_msgs</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>
