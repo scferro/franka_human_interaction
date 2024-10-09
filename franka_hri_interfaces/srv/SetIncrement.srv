@@ -1,0 +1,7 @@
+# Request
+geometry_msgs/Vector3 linear  # Linear increment in x, y, z
+geometry_msgs/Vector3 angular # Angular increment around x, y, z axes (in radians)
+---
+# Response
+bool success                  # Whether the increment was successfully set
+string message                # Additional information (e.g., error messages)

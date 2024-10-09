@@ -1,0 +1,12 @@
+# franka_hri_interfaces/action/DoAction.action
+
+# Goal
+sensor_msgs/Image goal_image
+string text_command
+---
+# Result
+bool success
+string message
+---
+# Feedback
+float32 progress
