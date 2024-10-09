@@ -19,9 +19,12 @@ find_package(visualization_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "action/EmptyAction.action"
   "action/PoseAction.action"
+  "action/DoActionModel.action"
   "srv/CreateBox.srv"
   "srv/UpdateMarkers.srv"
   "srv/SortNet.srv"
+  "srv/SetPose.srv"
+  "srv/SetIncrement.srv"
     DEPENDENCIES geometry_msgs franka_msgs visualization_msgs
     )
 
