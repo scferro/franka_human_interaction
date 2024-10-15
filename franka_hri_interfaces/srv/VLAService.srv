@@ -1,0 +1,9 @@
+# Request
+string text_command
+sensor_msgs/Image[] observations
+sensor_msgs/Image[] goal_images
+---
+# Response
+geometry_msgs/Vector3 linear
+geometry_msgs/Vector3 angular
+bool gripper
