@@ -1,6 +1,10 @@
 # franka_human_interaction
 
-Contains a set of ROS 2 Packages to control the Franka Emika Panda during human-robot interactions.
+The repo contains a set of ROS 2 Packages to control the Franka Emika Panda during two different human-robot interaction scenarios.
+
+## Human-Robot Interactions with Vision-Language-Action Model
+
+The goal of this section of the project is to develop a system for training the robot to complete multi step tasks based on human demonstration and instruction. This portion of the prject is still under development. 
 
 ## Block Sorting with Online Human Feedback
 
