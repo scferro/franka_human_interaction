@@ -6,6 +6,7 @@ from launch.conditions import IfCondition
 from launch_param_builder import ParameterBuilder
 from moveit_configs_utils import MoveItConfigsBuilder
 from launch_ros.substitutions import FindPackageShare
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 
 def generate_launch_description():
     moveit_config = (
@@ -64,7 +65,8 @@ def generate_launch_description():
         parameters=[{
             "frequency": 10.0,
             "linear_scale": 0.1,
-            "angular_scale": 0.1,
+            "angular_scale": 0.2,
+            "teleop_enabled": True,
         }]
     )
 

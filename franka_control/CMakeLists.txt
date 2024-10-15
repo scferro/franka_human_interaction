@@ -24,7 +24,6 @@ find_package(trajectory_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_eigen REQUIRED)
 find_package(std_srvs REQUIRED)
-find_package(sensor_msgs REQUIRED)
 
 # Include directories
 include_directories(
@@ -34,17 +33,9 @@ include_directories(
   ${moveit_servo_INCLUDE_DIRS}
 )
 
-# Create the franka_control library
-add_library(franka_control
-  src/franka_control/robot_control.cpp
-  src/franka_control/collision_management.cpp
-  src/franka_control/gripper_control.cpp
-  src/franka_control/marker_handling.cpp
-  src/franka_control/block_sorting.cpp
-  src/franka_control/utils.cpp
-)
-
-ament_target_dependencies(franka_control
+# Create the manipulate_blocks executable
+add_executable(manipulate_blocks src/manipulate_blocks.cpp)
+ament_target_dependencies(manipulate_blocks
   rclcpp
   rclcpp_action
   moveit_ros_planning_interface
@@ -55,21 +46,18 @@ ament_target_dependencies(franka_control
   geometry_msgs
   visualization_msgs
   franka_hri_interfaces
-)
-
-# Create the manipulate_blocks executable
-add_executable(manipulate_blocks src/manipulate_blocks.cpp)
-target_link_libraries(manipulate_blocks franka_control)
-ament_target_dependencies(manipulate_blocks
-  rclcpp
-  rclcpp_action
-  franka_hri_interfaces
+  sensor_msgs
+  tf2_ros
+  tf2_geometry_msgs
+  trajectory_msgs
+  tf2
+  tf2_eigen
+  std_srvs
 )
 
 # Create the servo_control_node executable
 add_executable(servo_control_node src/servo_control_node.cpp)
 target_link_libraries(servo_control_node
-  franka_control
   ${tf2_LIBRARIES}
   ${tf2_eigen_LIBRARIES}
   ${tf2_geometry_msgs_LIBRARIES}
@@ -100,17 +88,37 @@ ament_target_dependencies(teleop_control_node
   sensor_msgs
   franka_hri_interfaces
   std_srvs
+  franka_msgs
+  rclcpp_action
+)
+
+# VLA control node
+add_executable(vla_control_node src/vla_control_node.cpp)
+target_link_libraries(vla_control_node
+  ${rclcpp_LIBRARIES}
+  ${sensor_msgs_LIBRARIES}
+  ${franka_hri_interfaces_LIBRARIES}
+  ${std_srvs_LIBRARIES}
+)
+ament_target_dependencies(vla_control_node
+  rclcpp
+  sensor_msgs
+  franka_hri_interfaces
+  std_srvs
+  franka_msgs
+  rclcpp_action
+  geometry_msgs
 )
 
 # Install targets
 install(TARGETS
-franka_control
-manipulate_blocks
-servo_control_node
-teleop_control_node 
-ARCHIVE DESTINATION lib
-LIBRARY DESTINATION lib
-RUNTIME DESTINATION lib/${PROJECT_NAME}
+  manipulate_blocks
+  servo_control_node
+  teleop_control_node
+  vla_control_node
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 
 # Install include directory
@@ -118,7 +126,7 @@ install(DIRECTORY include/
   DESTINATION include/
 )
 
-# Install launch files
+# Install launch files and config
 install(DIRECTORY
   launch
   config

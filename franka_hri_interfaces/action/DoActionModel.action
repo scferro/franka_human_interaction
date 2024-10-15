@@ -1,4 +1,4 @@
-# franka_hri_interfaces/action/DoAction.action
+# franka_hri_interfaces/action/DoActionModel.action
 
 # Goal
 sensor_msgs/Image goal_image

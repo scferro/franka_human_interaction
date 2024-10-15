@@ -6,6 +6,7 @@ from launch.conditions import IfCondition
 from launch_param_builder import ParameterBuilder
 from moveit_configs_utils import MoveItConfigsBuilder
 from launch_ros.substitutions import FindPackageShare
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 
 def generate_launch_description():
     moveit_config = (
@@ -47,17 +48,27 @@ def generate_launch_description():
     # VLA node
     teleop_control_node = Node(
         package="franka_vla",
-        executable="franka_octo",
-        name="franka_octo",
+        executable="vla_node",
+        name="vla_node",
         parameters=[{
-            "inference_frequency": 10.0,
-            "servo_frequency": 10.0,
-            "buffer_size": 5,
+            "inference_frequency": 5.0,
         }]
+    )
+
+    # Include the RealSense launch file
+    realsense_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource([
+            PathJoinSubstitution([
+                FindPackageShare('franka_vla'),
+                'launch',
+                'realsense.launch.py'
+            ])
+        ]),
     )
 
     return LaunchDescription([
         use_rviz_arg,
         rviz_node,
         teleop_control_node,
+        realsense_launch,
     ])

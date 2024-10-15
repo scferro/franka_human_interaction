@@ -23,7 +23,7 @@ setup(
     entry_points={
         'console_scripts': [
             'webcam_publisher = franka_vla.webcam_publisher:main',
-            'franka_octo = franka_vla.franka_octo:main',
+            'vla_node = franka_vla.vla_node:main',
         ],
     },
 )

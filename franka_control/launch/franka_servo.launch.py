@@ -52,8 +52,6 @@ def generate_launch_description():
                                   description="whether or not to use fake hardware."),
             DeclareLaunchArgument(name="use_rviz", default_value="true",
                                   description="whether or not to use rviz."),
-            DeclareLaunchArgument(name="robot_ip", default_value="dont-care",
-                                  description="IP address of the robot"),
             DeclareLaunchArgument(
                 'acceleration_filter_update_period',
                 default_value='0.01',
@@ -105,7 +103,6 @@ def generate_launch_description():
                 output="both",
                 parameters=[moveit_config.robot_description],
             ),
-
             # ServoControlNode
             Node(
                 package='franka_control',
@@ -124,12 +121,16 @@ def generate_launch_description():
                     moveit_config.joint_limits,
                 ],
             ),
-
+            # Franka gripper node
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource([PathJoinSubstitution(
+                    [FindPackageShare('franka_gripper'), 'launch', 'gripper.launch.py'])]),
+                launch_arguments={'robot_ip': "panda0.robot",}.items(),
+            ),
             ExecuteProcess(
                 cmd=["ros2 run controller_manager spawner panda_arm_controller"],
                 shell=True,
                 output="screen",
             ),
         ]
-        # + load_controllers
     )

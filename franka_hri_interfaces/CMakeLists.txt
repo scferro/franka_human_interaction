@@ -25,8 +25,9 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SortNet.srv"
   "srv/SetPose.srv"
   "srv/SetIncrement.srv"
-    DEPENDENCIES geometry_msgs franka_msgs visualization_msgs
-    )
+  "srv/VLAService.srv"
+DEPENDENCIES geometry_msgs franka_msgs visualization_msgs
+)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
