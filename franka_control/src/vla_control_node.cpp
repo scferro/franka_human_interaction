@@ -2,7 +2,7 @@
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <std_srvs/srv/set_bool.hpp>
-#include <franka_hri_interfaces/srv/set_increment.hpp>
+#include <franka_hri_interfaces/msg/increment.hpp>
 #include <franka_msgs/action/grasp.hpp>
 #include <franka_hri_interfaces/srv/vla_service.hpp>
 #include <franka_hri_interfaces/action/do_action_model.hpp>
@@ -29,8 +29,8 @@ public:
         this->declare_parameter("vla_enabled", true);
         this->declare_parameter("observation_buffer_size", 2);
         this->declare_parameter("action_timeout", 60.0);
-        this->declare_parameter("enable_depth_masking", false);
-        this->declare_parameter("depth_mask_threshold", 1.2); // in meters
+        this->declare_parameter("enable_depth_masking", true);
+        this->declare_parameter("depth_mask_threshold", 1.5); // in meters
 
         frequency_ = this->get_parameter("frequency").as_double();
         linear_scale_ = this->get_parameter("linear_scale").as_double();
@@ -54,13 +54,13 @@ public:
         // Publishers
         image_pub_ = this->create_publisher<sensor_msgs::msg::Image>("observations/image_main", 10);
         wrist_image_pub_ = this->create_publisher<sensor_msgs::msg::Image>("observations/image_wrist", 10);
+        increment_pub_ = this->create_publisher<franka_hri_interfaces::msg::Increment>("increment", 10);
 
         // Synchronizer for color and depth images
         sync_ = std::make_shared<Synchronizer>(SyncPolicy(10), color_sub_main_, depth_sub_main_);
         sync_->registerCallback(&VLAControlNode::imageCallback, this);
 
         // Services
-        set_increment_client_ = this->create_client<franka_hri_interfaces::srv::SetIncrement>("set_increment");
         enable_vla_service_ = this->create_service<std_srvs::srv::SetBool>(
             "enable_vla", std::bind(&VLAControlNode::enableVLACallback, this, std::placeholders::_1, std::placeholders::_2));
 
@@ -297,22 +297,22 @@ private:
 
     void sendIncrementCommand(const geometry_msgs::msg::Vector3& linear, const geometry_msgs::msg::Vector3& angular)
     {
-        auto increment_request = std::make_shared<franka_hri_interfaces::srv::SetIncrement::Request>();
+        auto increment_msg = franka_hri_interfaces::msg::Increment();
 
         // Scale the linear and angular values
-        increment_request->linear.x = linear.x * linear_scale_;
-        increment_request->linear.y = -linear.y * linear_scale_; // Invert y-axis to match Franka's coordinate system to Octo
-        increment_request->linear.z = -linear.z * linear_scale_; // Invert z-axis to match Franka's coordinate system to Octo
+        increment_msg.linear.x = linear.x * linear_scale_;
+        increment_msg.linear.y = linear.y * linear_scale_;
+        increment_msg.linear.z = linear.z * linear_scale_;
 
-        increment_request->angular.x = angular.x * angular_scale_;
-        increment_request->angular.y = -angular.y * angular_scale_; // Invert y-axis to match Franka's coordinate system to Octo
-        increment_request->angular.z = -angular.z * angular_scale_; // Invert z-axis to match Franka's coordinate system to Octo
+        increment_msg.angular.x = angular.x * angular_scale_;
+        increment_msg.angular.y = angular.y * angular_scale_;
+        increment_msg.angular.z = angular.z * angular_scale_;
 
-        RCLCPP_INFO(this->get_logger(), "Sending increment command: Linear (%.3f, %.3f, %.3f), Angular (%.3f, %.3f, %.3f)",
-                    increment_request->linear.x, increment_request->linear.y, increment_request->linear.z,
-                    increment_request->angular.x, increment_request->angular.y, increment_request->angular.z);
+        RCLCPP_INFO(this->get_logger(), "Publishing increment command: Linear (%.3f, %.3f, %.3f), Angular (%.3f, %.3f, %.3f)",
+                    increment_msg.linear.x, increment_msg.linear.y, increment_msg.linear.z,
+                    increment_msg.angular.x, increment_msg.angular.y, increment_msg.angular.z);
 
-        auto result = set_increment_client_->async_send_request(increment_request);
+        increment_pub_->publish(increment_msg);
     }
 
     void enableVLACallback(
@@ -370,7 +370,6 @@ private:
         }
     }
 
-    rclcpp::Client<franka_hri_interfaces::srv::SetIncrement>::SharedPtr set_increment_client_;
     rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr enable_vla_service_;
     rclcpp::Client<franka_hri_interfaces::srv::VLAService>::SharedPtr vla_client_;
     rclcpp_action::Server<DoActionModel>::SharedPtr action_server_;
@@ -380,6 +379,7 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr wrist_sub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr wrist_image_pub_;
+    rclcpp::Publisher<franka_hri_interfaces::msg::Increment>::SharedPtr increment_pub_;
     typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::Image, sensor_msgs::msg::Image> SyncPolicy;
     typedef message_filters::Synchronizer<SyncPolicy> Synchronizer;
     std::shared_ptr<Synchronizer> sync_;

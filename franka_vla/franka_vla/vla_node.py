@@ -44,7 +44,7 @@ class VLANode(Node):
 
     def vla_service_callback(self, request, response):
         """Callback for the VLA service."""
-        self.get_logger().info(f'Received service request with text command: {request.text_command}')
+        # self.get_logger().info(f'Received service request with text command: {request.text_command}')
 
         # Process main observation images
         observation_images_main = []
@@ -52,7 +52,6 @@ class VLANode(Node):
             cv_image = self.cv_bridge.imgmsg_to_cv2(img_msg, desired_encoding='bgr8')
             resized_image = cv2.resize(cv_image, (256, 256))
             observation_images_main.append(resized_image)
-            self.get_logger().info(f'Received {len(observation_images_main)} main images.')
 
         input_images_main = np.array(observation_images_main)
         input_images_main = input_images_main.reshape(1, len(observation_images_main), 256, 256, 3)
@@ -63,7 +62,6 @@ class VLANode(Node):
             cv_image = self.cv_bridge.imgmsg_to_cv2(img_msg, desired_encoding='bgr8')
             resized_image = cv2.resize(cv_image, (128, 128))
             observation_images_wrist.append(resized_image)
-            self.get_logger().info(f'Received {len(observation_images_wrist)} wrist images.')
 
         input_images_wrist = np.array(observation_images_wrist)
         input_images_wrist = input_images_wrist.reshape(1, len(observation_images_wrist), 128, 128, 3)

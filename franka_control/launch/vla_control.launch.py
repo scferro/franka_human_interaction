@@ -11,15 +11,6 @@ import os
 from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
-    moveit_config = (
-        MoveItConfigsBuilder("numsr_franka")
-        .robot_description(file_path="config/panda_arm_real.urdf.xacro")
-        .robot_description_semantic(file_path="config/panda_arm.srdf")
-        .robot_description_kinematics(file_path="config/kinematics.yaml")
-        .trajectory_execution(file_path="config/panda_controllers.yaml")
-        .joint_limits(file_path="config/joint_limits.yaml")
-        .to_moveit_configs()
-    )
 
     # Declare the use_rviz argument
     use_rviz_arg = DeclareLaunchArgument(
@@ -34,9 +25,9 @@ def generate_launch_description():
         executable="vla_control_node",
         name="vla_control_node",
         parameters=[{
-            "frequency": 5.0,
-            "linear_scale": 0.15,
-            "angular_scale": 0.05,
+            "frequency": 3.0,
+            "linear_scale": 10.0,
+            "angular_scale": 10.0,
             "vla_enabled": True,
             "observation_buffer_size": 2,
             "action_timeout": 100.0,

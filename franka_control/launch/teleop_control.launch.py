@@ -8,16 +8,6 @@ from launch_ros.substitutions import FindPackageShare
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 
 def generate_launch_description():
-    moveit_config = (
-        MoveItConfigsBuilder("numsr_franka")
-        .robot_description(file_path="config/panda_arm_real.urdf.xacro")
-        .robot_description_semantic(file_path="config/panda_arm.srdf")
-        .robot_description_kinematics(file_path="config/kinematics.yaml")
-        .trajectory_execution(file_path="config/panda_controllers.yaml")
-        .joint_limits(file_path="config/joint_limits.yaml")
-        .to_moveit_configs()
-    )
-
     # Declare the use_rviz argument
     use_rviz_arg = DeclareLaunchArgument(
         'use_rviz',
@@ -35,12 +25,6 @@ def generate_launch_description():
         name="rviz2",
         output="log",
         arguments=["-d", rviz_config_file],
-        parameters=[
-            moveit_config.robot_description,
-            moveit_config.robot_description_semantic,
-            moveit_config.robot_description_kinematics,
-            moveit_config.joint_limits,
-        ],
         condition=IfCondition(LaunchConfiguration("use_rviz"))
     )
 

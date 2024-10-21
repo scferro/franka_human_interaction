@@ -28,9 +28,6 @@ def generate_launch_description():
         .to_dict()
     }
 
-    # This filter parameter should be >1. Increase it for greater smoothing but slower motion.
-    low_pass_filter_coeff = {"butterworth_filter_coeff": 3.0}
-
     # Load controllers
     load_controllers = []
     for controller in [
@@ -114,12 +111,10 @@ def generate_launch_description():
                     servo_params,
                     {'update_period': LaunchConfiguration('acceleration_filter_update_period')},
                     {'planning_group_name': LaunchConfiguration('planning_group_name')},
-                    low_pass_filter_coeff,
                     moveit_config.robot_description,
                     moveit_config.robot_description_semantic,
                     moveit_config.robot_description_kinematics,
                     moveit_config.joint_limits,
-                    {"loop_rate": 10.0,},
                 ],
             ),
             # Franka gripper node

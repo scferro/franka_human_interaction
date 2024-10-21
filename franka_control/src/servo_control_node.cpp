@@ -41,9 +41,6 @@ int main(int argc, char* argv[])
       std::make_shared<const servo::ParamListener>(servo_control_node, param_namespace);
   servo::Params servo_params = servo_param_listener->get_params();
 
-  // Enable smoothing
-  servo_params.use_smoothing = true;
-
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr trajectory_outgoing_cmd_pub =
       servo_control_node->create_publisher<trajectory_msgs::msg::JointTrajectory>(servo_params.command_out_topic,
                                                                          rclcpp::SystemDefaultsQoS());
@@ -65,7 +62,7 @@ int main(int argc, char* argv[])
   const moveit::core::JointModelGroup* joint_model_group =
       robot_state->getJointModelGroup(servo_params.move_group_name);
 
-  rclcpp::WallRate command_rate(20);
+  rclcpp::WallRate command_rate(30);
   RCLCPP_INFO_STREAM(servo_control_node->get_logger(), servo.getStatusMessage());
 
   while (rclcpp::ok())
