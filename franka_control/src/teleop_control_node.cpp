@@ -1,7 +1,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joy.hpp>
 #include <std_srvs/srv/set_bool.hpp>
-#include <franka_hri_interfaces/srv/set_increment.hpp>
+#include <franka_hri_interfaces/msg/increment.hpp>
 #include <franka_msgs/action/grasp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 
@@ -12,8 +12,8 @@ public:
     {
         // Parameters
         this->declare_parameter("frequency", 10.0);
-        this->declare_parameter("linear_scale", 0.001);
-        this->declare_parameter("angular_scale", 0.01);
+        this->declare_parameter("linear_scale", 0.0001);
+        this->declare_parameter("angular_scale", 0.001);
         this->declare_parameter("teleop_enabled", true);
 
         frequency_ = this->get_parameter("frequency").as_double();
@@ -25,8 +25,10 @@ public:
         joy_sub_ = this->create_subscription<sensor_msgs::msg::Joy>(
             "joy", 10, std::bind(&TeleopControlNode::joyCallback, this, std::placeholders::_1));
 
+        // Publishers
+        increment_pub_ = this->create_publisher<franka_hri_interfaces::msg::Increment>("increment", 10);
+
         // Services
-        set_increment_client_ = this->create_client<franka_hri_interfaces::srv::SetIncrement>("set_increment");
         enable_teleop_service_ = this->create_service<std_srvs::srv::SetBool>(
             "enable_teleop", std::bind(&TeleopControlNode::enableTeleopCallback, this, std::placeholders::_1, std::placeholders::_2));
 
@@ -76,20 +78,24 @@ private:
     {
         if (!teleop_enabled_) return;
 
-        auto request = std::make_shared<franka_hri_interfaces::srv::SetIncrement::Request>();
+        auto increment_msg = franka_hri_interfaces::msg::Increment();
 
         // Linear motion (left stick)
-        request->linear.x = left_stick_y_ * linear_scale_;
-        request->linear.y = left_stick_x_ * linear_scale_;
-        request->linear.z = (right_trigger_ - left_trigger_) * linear_scale_ / 2.;
-        RCLCPP_INFO(this->get_logger(), "Linear X: %f, Linear Y: %f, Linear Z: %f", request->linear.x, request->linear.y, request->linear.z);
+        increment_msg.linear.x = left_stick_y_ * linear_scale_;
+        increment_msg.linear.y = left_stick_x_ * linear_scale_;
+        increment_msg.linear.z = (right_trigger_ - left_trigger_) * linear_scale_ / 2.;
 
         // Angular motion (right stick)
-        request->angular.x = right_stick_y_ * angular_scale_;
-        request->angular.y = right_stick_x_ * angular_scale_;
-        request->angular.z = (right_bumper_ - left_bumper_) * angular_scale_;
+        increment_msg.angular.x = right_stick_y_ * angular_scale_;
+        increment_msg.angular.y = right_stick_x_ * angular_scale_;
+        increment_msg.angular.z = (right_bumper_ - left_bumper_) * angular_scale_;
+        
+        RCLCPP_INFO(this->get_logger(), "Linear X: %f, Linear Y: %f, Linear Z: %f", 
+                    increment_msg.linear.x, increment_msg.linear.y, increment_msg.linear.z);
+        RCLCPP_INFO(this->get_logger(), "Angular X: %f, Angular Y: %f, Angular Z: %f", 
+                    increment_msg.angular.x, increment_msg.angular.y, increment_msg.angular.z);
 
-        auto result = set_increment_client_->async_send_request(request);
+        increment_pub_->publish(increment_msg);
     }
 
     void enableTeleopCallback(
@@ -148,7 +154,7 @@ private:
     }
 
     rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;
-    rclcpp::Client<franka_hri_interfaces::srv::SetIncrement>::SharedPtr set_increment_client_;
+    rclcpp::Publisher<franka_hri_interfaces::msg::Increment>::SharedPtr increment_pub_;
     rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr enable_teleop_service_;
     rclcpp_action::Client<franka_msgs::action::Grasp>::SharedPtr gripper_action_client_;
     rclcpp::TimerBase::SharedPtr timer_;

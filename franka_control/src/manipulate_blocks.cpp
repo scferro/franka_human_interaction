@@ -17,7 +17,6 @@
 #include <tf2_ros/transform_listener.h>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 
-#include "franka_hri_interfaces/action/pose_action.hpp"
 #include "franka_hri_interfaces/action/empty_action.hpp"
 #include "franka_hri_interfaces/srv/create_box.hpp"
 #include "franka_hri_interfaces/srv/update_markers.hpp"

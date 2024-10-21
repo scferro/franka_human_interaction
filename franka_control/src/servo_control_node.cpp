@@ -10,33 +10,20 @@
 #include <std_srvs/srv/empty.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2_ros/transform_listener.h>
-#include <franka_hri_interfaces/srv/set_increment.hpp>
+#include <franka_hri_interfaces/msg/increment.hpp>
+#include <thread>
 
 using std::placeholders::_1, std::placeholders::_2;
 using namespace moveit_servo;
 
-double smoothing_factor = 0.025; // Adjust this value to change smoothing strength
-
-static Eigen::Vector3d linear_step_size{0.00, 0.00, 0.00};
-static Eigen::Vector3d angular_step_size{0.00, 0.00, 0.00};
+static Eigen::Vector3d linear_vel_cmd{0.00, 0.00, 0.00};
+static Eigen::Vector3d angular_vel_cmd{0.00, 0.00, 0.00};
 bool move_robot = false;
 
-void set_increment_callback(
-    const std::shared_ptr<franka_hri_interfaces::srv::SetIncrement::Request> request,
-    std::shared_ptr<franka_hri_interfaces::srv::SetIncrement::Response> response)
+void increment_callback(const franka_hri_interfaces::msg::Increment::SharedPtr msg)
 {
-  linear_step_size = Eigen::Vector3d{
-    request->linear.x,
-    request->linear.y,
-    request->linear.z};
-
-  angular_step_size = Eigen::Vector3d{
-    request->angular.x,
-    request->angular.y,
-    request->angular.z};
-
-  response->success = true;
-  response->message = "Increment set successfully";
+  linear_vel_cmd = Eigen::Vector3d{msg->linear.x, msg->linear.y, msg->linear.z};
+  angular_vel_cmd = Eigen::Vector3d{msg->angular.x, msg->angular.y, msg->angular.z};
 }
 
 int main(int argc, char* argv[])
@@ -46,70 +33,64 @@ int main(int argc, char* argv[])
 
   const rclcpp::Node::SharedPtr servo_control_node = std::make_shared<rclcpp::Node>("servo_control_node");
 
-  rclcpp::Service<franka_hri_interfaces::srv::SetIncrement>::SharedPtr service = 
-      servo_control_node->create_service<franka_hri_interfaces::srv::SetIncrement>(
-          "set_increment", &set_increment_callback);
+  auto increment_sub = servo_control_node->create_subscription<franka_hri_interfaces::msg::Increment>(
+      "increment", 10, &increment_callback);
 
   const std::string param_namespace = "moveit_servo";
   const std::shared_ptr<const servo::ParamListener> servo_param_listener =
       std::make_shared<const servo::ParamListener>(servo_control_node, param_namespace);
-  const servo::Params servo_params = servo_param_listener->get_params();
+  servo::Params servo_params = servo_param_listener->get_params();
+
+  // Enable smoothing
+  servo_params.use_smoothing = true;
 
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr trajectory_outgoing_cmd_pub =
       servo_control_node->create_publisher<trajectory_msgs::msg::JointTrajectory>(servo_params.command_out_topic,
                                                                          rclcpp::SystemDefaultsQoS());
+
   const planning_scene_monitor::PlanningSceneMonitorPtr planning_scene_monitor =
       createPlanningSceneMonitor(servo_control_node, servo_params);
+
   Servo servo = Servo(servo_control_node, servo_param_listener, planning_scene_monitor);
 
-  std::mutex pose_guard;
+  std::mutex twist_guard;
 
-  servo.setCommandType(CommandType::POSE);
+  servo.setCommandType(CommandType::TWIST);
 
-  PoseCommand target_pose_command;
-  target_pose_command.frame_id = servo_params.planning_frame;
-  target_pose_command.pose = servo.getEndEffectorPose();
+  TwistCommand target_twist;
+  target_twist.frame_id = servo_params.planning_frame;
+  target_twist.velocities.resize(6);
 
-  rclcpp::WallRate command_rate(50);
-  Eigen::Isometry3d current_pose = servo.getEndEffectorPose();
-  Eigen::Isometry3d target_pose = current_pose;
+  auto robot_state = planning_scene_monitor->getStateMonitor()->getCurrentState();
+  const moveit::core::JointModelGroup* joint_model_group =
+      robot_state->getJointModelGroup(servo_params.move_group_name);
+
+  rclcpp::WallRate command_rate(20);
+  RCLCPP_INFO_STREAM(servo_control_node->get_logger(), servo.getStatusMessage());
 
   while (rclcpp::ok())
   {
     {
-      std::lock_guard<std::mutex> pguard(pose_guard);
+      std::lock_guard<std::mutex> tguard(twist_guard);
+      target_twist.velocities << linear_vel_cmd.x(), linear_vel_cmd.y(), linear_vel_cmd.z(),
+                                 angular_vel_cmd.x(), angular_vel_cmd.y(), angular_vel_cmd.z();
 
-      // Apply smoothing to the input step sizes
-      smoothed_linear_step_size = smoothed_linear_step_size + smoothing_factor * (linear_step_size - smoothed_linear_step_size);
-      smoothed_angular_step_size = smoothed_angular_step_size + smoothing_factor * (angular_step_size - smoothed_angular_step_size);
+      KinematicState joint_state = servo.getNextJointState(target_twist);
+      StatusCode status = servo.getStatus();
 
-      // Update target pose using smoothed input increments
-      Eigen::Isometry3d new_target = target_pose;
-      new_target.translate(smoothed_linear_step_size);
-      new_target.rotate(Eigen::AngleAxisd(smoothed_angular_step_size.x(), Eigen::Vector3d::UnitX()));
-      new_target.rotate(Eigen::AngleAxisd(smoothed_angular_step_size.y(), Eigen::Vector3d::UnitY()));
-      new_target.rotate(Eigen::AngleAxisd(smoothed_angular_step_size.z(), Eigen::Vector3d::UnitZ()));
-
-      // No need to smooth deltas now, directly update the target pose
-      target_pose = new_target;
-
-      // Update the target_pose_command with the new, smoothed target pose
-      target_pose_command.pose = target_pose;
-
-      // Get next joint state based on the smoothed target pose
-      KinematicState joint_state = servo.getNextJointState(target_pose_command);
-
-      // Publish the joint state
-      trajectory_outgoing_cmd_pub->publish(composeTrajectoryMessage(servo_params, joint_state));
-
-      // Update current pose
-      current_pose = servo.getEndEffectorPose();
-
-      rclcpp::spin_some(servo_control_node);
+      if (status != StatusCode::INVALID)
+      {
+        trajectory_msgs::msg::JointTrajectory trajectory_msg = composeTrajectoryMessage(servo_params, joint_state);
+        trajectory_outgoing_cmd_pub->publish(trajectory_msg);
+        
+        robot_state->setJointGroupPositions(joint_model_group, joint_state.positions);
+        robot_state->setJointGroupVelocities(joint_model_group, joint_state.velocities);
+      }
     }
+    rclcpp::spin_some(servo_control_node);
     command_rate.sleep();
   }
 
-
   rclcpp::shutdown();
+  return 0;
 }

@@ -34,10 +34,12 @@ def generate_launch_description():
         executable="vla_control_node",
         name="vla_control_node",
         parameters=[{
-            "frequency": 10.0,
-            "linear_scale": 0.1,
-            "angular_scale": 0.2,
+            "frequency": 5.0,
+            "linear_scale": 0.15,
+            "angular_scale": 0.05,
             "vla_enabled": True,
+            "observation_buffer_size": 2,
+            "action_timeout": 100.0,
         }]
     )
 

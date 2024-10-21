@@ -25,6 +25,6 @@ setup(
         ],
     },
     py_modules=[
-        'franka_hri/network',  
+        'franka_hri_sorting/network',  
     ],
 )

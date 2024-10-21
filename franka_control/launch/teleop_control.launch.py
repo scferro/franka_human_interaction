@@ -3,7 +3,6 @@ from launch_ros.actions import Node
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch.conditions import IfCondition
-from launch_param_builder import ParameterBuilder
 from moveit_configs_utils import MoveItConfigsBuilder
 from launch_ros.substitutions import FindPackageShare
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -64,8 +63,8 @@ def generate_launch_description():
         name="teleop_control_node",
         parameters=[{
             "frequency": 10.0,
-            "linear_scale": 0.1,
-            "angular_scale": 0.2,
+            "linear_scale": 1.0,
+            "angular_scale": 1.0,
             "teleop_enabled": True,
         }]
     )

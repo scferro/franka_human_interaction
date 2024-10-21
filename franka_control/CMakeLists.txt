@@ -16,6 +16,7 @@ find_package(moveit_servo REQUIRED)
 find_package(franka_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
+find_package(object_recognition_msgs REQUIRED)
 find_package(franka_hri_interfaces REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
@@ -24,6 +25,10 @@ find_package(trajectory_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_eigen REQUIRED)
 find_package(std_srvs REQUIRED)
+find_package(OpenCV REQUIRED)
+find_package(cv_bridge REQUIRED)
+find_package(message_filters REQUIRED)
+find_package(Eigen3 REQUIRED)
 
 # Include directories
 include_directories(
@@ -31,6 +36,7 @@ include_directories(
   ${moveit_core_INCLUDE_DIRS}
   ${moveit_ros_planning_interface_INCLUDE_DIRS}
   ${moveit_servo_INCLUDE_DIRS}
+  ${OpenCV_INCLUDE_DIRS}
 )
 
 # Create the manipulate_blocks executable
@@ -73,6 +79,7 @@ ament_target_dependencies(servo_control_node
   tf2_geometry_msgs
   tf2_ros
   trajectory_msgs
+  Eigen3
 )
 
 # Teleop control node
@@ -99,6 +106,7 @@ target_link_libraries(vla_control_node
   ${sensor_msgs_LIBRARIES}
   ${franka_hri_interfaces_LIBRARIES}
   ${std_srvs_LIBRARIES}
+  ${OpenCV_LIBS}
 )
 ament_target_dependencies(vla_control_node
   rclcpp
@@ -108,6 +116,9 @@ ament_target_dependencies(vla_control_node
   franka_msgs
   rclcpp_action
   geometry_msgs
+  OpenCV
+  cv_bridge
+  message_filters
 )
 
 # Install targets

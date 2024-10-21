@@ -20,7 +20,7 @@ class VLANode(Node):
         # Load the pre-trained OctoModel
         self.get_logger().info('Loading pre-trained OctoModel')
         try:
-            self.model = OctoModel.load_pretrained("hf://rail-berkeley/octo-small-1.5")
+            self.model = OctoModel.load_pretrained("hf://rail-berkeley/octo-base-1.5")
             self.get_logger().info('OctoModel loaded successfully')
         except Exception as e:
             self.get_logger().error(f'Failed to load OctoModel: {str(e)}')
@@ -46,19 +46,32 @@ class VLANode(Node):
         """Callback for the VLA service."""
         self.get_logger().info(f'Received service request with text command: {request.text_command}')
 
-        # Process observation images
-        observation_images = []
-        for img_msg in request.observations:
+        # Process main observation images
+        observation_images_main = []
+        for img_msg in request.observations_main:
             cv_image = self.cv_bridge.imgmsg_to_cv2(img_msg, desired_encoding='bgr8')
             resized_image = cv2.resize(cv_image, (256, 256))
-            observation_images.append(resized_image)
+            observation_images_main.append(resized_image)
+            self.get_logger().info(f'Received {len(observation_images_main)} main images.')
 
-        input_images = np.array(observation_images)
-        input_images = input_images.reshape(1, len(observation_images), 256, 256, 3)
+        input_images_main = np.array(observation_images_main)
+        input_images_main = input_images_main.reshape(1, len(observation_images_main), 256, 256, 3)
+
+        # Process wrist observation images
+        observation_images_wrist = []
+        for img_msg in request.observations_wrist:
+            cv_image = self.cv_bridge.imgmsg_to_cv2(img_msg, desired_encoding='bgr8')
+            resized_image = cv2.resize(cv_image, (128, 128))
+            observation_images_wrist.append(resized_image)
+            self.get_logger().info(f'Received {len(observation_images_wrist)} wrist images.')
+
+        input_images_wrist = np.array(observation_images_wrist)
+        input_images_wrist = input_images_wrist.reshape(1, len(observation_images_wrist), 128, 128, 3)
 
         observation = {
-            'image_primary': input_images,
-            'timestep_pad_mask': np.ones((1, len(observation_images)), dtype=bool),
+            'image_primary': input_images_main,
+            'image_wrist': input_images_wrist,
+            'timestep_pad_mask': np.ones((1, len(observation_images_main)), dtype=bool),
         }
 
         try:
@@ -77,12 +90,13 @@ class VLANode(Node):
             
             self.get_logger().info(f"Returning action: "
                         f"linear: ({response.linear.x:.4f}, {response.linear.y:.4f}, {response.linear.z:.4f}), "
-                        f"angular: ({response.angular.x:.4f}, {response.angular.y:.4f}, {response.angular.z:.4f})")
+                        f"angular: ({response.angular.x:.4f}, {response.angular.y:.4f}, {response.angular.z:.4f}), "
+                        f"gripper: {response.gripper}")
         except Exception as e:
             self.get_logger().error(f'Error in model inference: {str(e)}')
             response.linear = Vector3()
             response.angular = Vector3()
-            response.gripper = bool()
+            response.gripper = False
 
         return response
 

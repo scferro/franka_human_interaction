@@ -26,6 +26,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SetPose.srv"
   "srv/SetIncrement.srv"
   "srv/VLAService.srv"
+  "msg/Increment.msg"
 DEPENDENCIES geometry_msgs franka_msgs visualization_msgs
 )
 
