@@ -10,17 +10,23 @@
 #include <std_srvs/srv/empty.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2_ros/transform_listener.h>
-#include <franka_hri_interfaces/msg/increment.hpp>
+#include <franka_hri_interfaces/msg/ee_command.hpp>
 #include <thread>
 
 using std::placeholders::_1, std::placeholders::_2;
 using namespace moveit_servo;
 
+// Current commanded velocities
 static Eigen::Vector3d linear_vel_cmd{0.00, 0.00, 0.00};
 static Eigen::Vector3d angular_vel_cmd{0.00, 0.00, 0.00};
+
+// Current smoothed velocities
+static Eigen::Vector3d current_linear_vel{0.00, 0.00, 0.00};
+static Eigen::Vector3d current_angular_vel{0.00, 0.00, 0.00};
+
 bool move_robot = false;
 
-void increment_callback(const franka_hri_interfaces::msg::Increment::SharedPtr msg)
+void ee_command_callback(const franka_hri_interfaces::msg::EECommand::SharedPtr msg)
 {
   linear_vel_cmd = Eigen::Vector3d{msg->linear.x, msg->linear.y, msg->linear.z};
   angular_vel_cmd = Eigen::Vector3d{msg->angular.x, msg->angular.y, msg->angular.z};
@@ -33,8 +39,17 @@ int main(int argc, char* argv[])
 
   const rclcpp::Node::SharedPtr servo_control_node = std::make_shared<rclcpp::Node>("servo_control_node");
 
-  auto increment_sub = servo_control_node->create_subscription<franka_hri_interfaces::msg::Increment>(
-      "increment", 10, &increment_callback);
+  // Declare and get smoothing parameters
+  servo_control_node->declare_parameter("max_linear_acc", 2.0);  // m/s^2
+  servo_control_node->declare_parameter("max_angular_acc", 4.0); // rad/s^2
+  servo_control_node->declare_parameter("smoothing_factor", 0.8); // 0-1, higher = less smoothing
+
+  const double max_linear_acc = servo_control_node->get_parameter("max_linear_acc").as_double();
+  const double max_angular_acc = servo_control_node->get_parameter("max_angular_acc").as_double();
+  const double smoothing_factor = servo_control_node->get_parameter("smoothing_factor").as_double();
+
+  auto ee_command_sub = servo_control_node->create_subscription<franka_hri_interfaces::msg::EECommand>(
+      "ee_command", 10, &ee_command_callback);
 
   const std::string param_namespace = "moveit_servo";
   const std::shared_ptr<const servo::ParamListener> servo_param_listener =
@@ -62,15 +77,45 @@ int main(int argc, char* argv[])
   const moveit::core::JointModelGroup* joint_model_group =
       robot_state->getJointModelGroup(servo_params.move_group_name);
 
-  rclcpp::WallRate command_rate(30);
+  const double update_rate = 30.0; // Hz
+  const double dt = 1.0 / update_rate;
+  rclcpp::WallRate command_rate(update_rate);
   RCLCPP_INFO_STREAM(servo_control_node->get_logger(), servo.getStatusMessage());
 
   while (rclcpp::ok())
   {
     {
       std::lock_guard<std::mutex> tguard(twist_guard);
-      target_twist.velocities << linear_vel_cmd.x(), linear_vel_cmd.y(), linear_vel_cmd.z(),
-                                 angular_vel_cmd.x(), angular_vel_cmd.y(), angular_vel_cmd.z();
+      
+      // Calculate velocity differences
+      Eigen::Vector3d linear_vel_diff = linear_vel_cmd - current_linear_vel;
+      Eigen::Vector3d angular_vel_diff = angular_vel_cmd - current_angular_vel;
+
+      // Calculate accelerations
+      Eigen::Vector3d linear_acc = linear_vel_diff / dt;
+      Eigen::Vector3d angular_acc = angular_vel_diff / dt;
+
+      // Limit accelerations
+      if (linear_acc.norm() > max_linear_acc) {
+        linear_acc = linear_acc.normalized() * max_linear_acc;
+      }
+      if (angular_acc.norm() > max_angular_acc) {
+        angular_acc = angular_acc.normalized() * max_angular_acc;
+      }
+
+      // Calculate next velocities based on limited accelerations
+      Eigen::Vector3d next_linear_vel = current_linear_vel + linear_acc * dt;
+      Eigen::Vector3d next_angular_vel = current_angular_vel + angular_acc * dt;
+
+      // Apply smoothing filter
+      current_linear_vel = smoothing_factor * next_linear_vel + 
+                          (1.0 - smoothing_factor) * current_linear_vel;
+      current_angular_vel = smoothing_factor * next_angular_vel + 
+                           (1.0 - smoothing_factor) * current_angular_vel;
+
+      // Use smoothed velocities for the twist command
+      target_twist.velocities << current_linear_vel.x(), current_linear_vel.y(), current_linear_vel.z(),
+                                current_angular_vel.x(), current_angular_vel.y(), current_angular_vel.z();
 
       KinematicState joint_state = servo.getNextJointState(target_twist);
       StatusCode status = servo.getStatus();

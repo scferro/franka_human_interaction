@@ -22,7 +22,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'webcam_publisher = franka_vla.webcam_publisher:main',
+            'data_recorder_node = franka_vla.data_recorder_node:main',
             'vla_node = franka_vla.vla_node:main',
         ],
     },

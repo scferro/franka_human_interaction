@@ -1,8 +1,9 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joy.hpp>
 #include <std_srvs/srv/set_bool.hpp>
-#include <franka_hri_interfaces/msg/increment.hpp>
+#include <franka_hri_interfaces/msg/ee_command.hpp>
 #include <franka_msgs/action/grasp.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 
 class TeleopControlNode : public rclcpp::Node
@@ -12,8 +13,8 @@ public:
     {
         // Parameters
         this->declare_parameter("frequency", 10.0);
-        this->declare_parameter("linear_scale", 0.0001);
-        this->declare_parameter("angular_scale", 0.001);
+        this->declare_parameter("linear_scale", 1.0);
+        this->declare_parameter("angular_scale", 1.0);
         this->declare_parameter("teleop_enabled", true);
 
         frequency_ = this->get_parameter("frequency").as_double();
@@ -26,7 +27,7 @@ public:
             "joy", 10, std::bind(&TeleopControlNode::joyCallback, this, std::placeholders::_1));
 
         // Publishers
-        increment_pub_ = this->create_publisher<franka_hri_interfaces::msg::Increment>("increment", 10);
+        ee_command_pub_ = this->create_publisher<franka_hri_interfaces::msg::EECommand>("ee_command", 10);
 
         // Services
         enable_teleop_service_ = this->create_service<std_srvs::srv::SetBool>(
@@ -36,7 +37,7 @@ public:
         gripper_action_client_ = rclcpp_action::create_client<franka_msgs::action::Grasp>(
             this, "panda_gripper/grasp");
 
-        // Timer
+        // Timers
         timer_ = this->create_wall_timer(
             std::chrono::duration<double>(1.0 / frequency_),
             std::bind(&TeleopControlNode::timerCallback, this));
@@ -61,6 +62,7 @@ private:
         if (msg->buttons[0] && !a_button_pressed_) {
             a_button_pressed_ = true;
             sendGripperCommand(false);  // Open gripper
+            is_gripper_open_ = true;
         } else if (!msg->buttons[0]) {
             a_button_pressed_ = false;
         }
@@ -69,6 +71,7 @@ private:
         if (msg->buttons[1] && !b_button_pressed_) {
             b_button_pressed_ = true;
             sendGripperCommand(true);  // Close gripper
+            is_gripper_open_ = false;
         } else if (!msg->buttons[1]) {
             b_button_pressed_ = false;
         }
@@ -78,24 +81,27 @@ private:
     {
         if (!teleop_enabled_) return;
 
-        auto increment_msg = franka_hri_interfaces::msg::Increment();
+        auto ee_command_msg = franka_hri_interfaces::msg::EECommand();
 
         // Linear motion (left stick)
-        increment_msg.linear.x = left_stick_y_ * linear_scale_;
-        increment_msg.linear.y = left_stick_x_ * linear_scale_;
-        increment_msg.linear.z = (right_trigger_ - left_trigger_) * linear_scale_ / 2.;
+        ee_command_msg.linear.x = left_stick_y_ * linear_scale_;
+        ee_command_msg.linear.y = left_stick_x_ * linear_scale_;
+        ee_command_msg.linear.z = (right_trigger_ - left_trigger_) * linear_scale_ / 2.;
 
         // Angular motion (right stick)
-        increment_msg.angular.x = right_stick_y_ * angular_scale_;
-        increment_msg.angular.y = right_stick_x_ * angular_scale_;
-        increment_msg.angular.z = (right_bumper_ - left_bumper_) * angular_scale_;
+        ee_command_msg.angular.x = right_stick_x_ * angular_scale_;
+        ee_command_msg.angular.y = right_stick_y_ * angular_scale_;
+        ee_command_msg.angular.z = (right_bumper_ - left_bumper_) * angular_scale_;
+        
+        // Set gripper state
+        ee_command_msg.gripper = is_gripper_open_;
         
         RCLCPP_INFO(this->get_logger(), "Linear X: %f, Linear Y: %f, Linear Z: %f", 
-                    increment_msg.linear.x, increment_msg.linear.y, increment_msg.linear.z);
+                    ee_command_msg.linear.x, ee_command_msg.linear.y, ee_command_msg.linear.z);
         RCLCPP_INFO(this->get_logger(), "Angular X: %f, Angular Y: %f, Angular Z: %f", 
-                    increment_msg.angular.x, increment_msg.angular.y, increment_msg.angular.z);
+                    ee_command_msg.angular.x, ee_command_msg.angular.y, ee_command_msg.angular.z);
 
-        increment_pub_->publish(increment_msg);
+        ee_command_pub_->publish(ee_command_msg);
     }
 
     void enableTeleopCallback(
@@ -111,9 +117,11 @@ private:
     void sendGripperCommand(bool close_gripper)
     {
         auto goal_msg = franka_msgs::action::Grasp::Goal();
-        goal_msg.width = close_gripper ? 0.02 : 0.08;  // 0.0 for closed, 0.08 for open
-        goal_msg.speed = 0.1;  // Adjust as needed
-        goal_msg.force = 0.001;  // Adjust as needed
+        goal_msg.width = close_gripper ? 0.02 : 0.08;  // 0.02 for closed, 0.08 for open
+        goal_msg.speed = 0.1;
+        goal_msg.force = 10.;
+        goal_msg.epsilon.inner = 0.2;
+        goal_msg.epsilon.outer = 0.2;
 
         RCLCPP_INFO(this->get_logger(), "Sending gripper command: %s", close_gripper ? "Close" : "Open");
 
@@ -154,7 +162,7 @@ private:
     }
 
     rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;
-    rclcpp::Publisher<franka_hri_interfaces::msg::Increment>::SharedPtr increment_pub_;
+    rclcpp::Publisher<franka_hri_interfaces::msg::EECommand>::SharedPtr ee_command_pub_;
     rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr enable_teleop_service_;
     rclcpp_action::Client<franka_msgs::action::Grasp>::SharedPtr gripper_action_client_;
     rclcpp::TimerBase::SharedPtr timer_;
@@ -163,6 +171,7 @@ private:
     double linear_scale_;
     double angular_scale_;
     bool teleop_enabled_;
+    bool is_gripper_open_ = true;  // Initialize as open
 
     // Joystick values
     double left_stick_x_ = 0.0;

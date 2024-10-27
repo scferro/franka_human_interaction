@@ -2,7 +2,7 @@
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <std_srvs/srv/set_bool.hpp>
-#include <franka_hri_interfaces/msg/increment.hpp>
+#include <franka_hri_interfaces/msg/ee_command.hpp>
 #include <franka_msgs/action/grasp.hpp>
 #include <franka_hri_interfaces/srv/vla_service.hpp>
 #include <franka_hri_interfaces/action/do_action_model.hpp>
@@ -24,13 +24,14 @@ public:
     {
         // Parameters
         this->declare_parameter("frequency", 5.0);
-        this->declare_parameter("linear_scale", 0.001);
-        this->declare_parameter("angular_scale", 0.01);
+        this->declare_parameter("linear_scale", 1.0);
+        this->declare_parameter("angular_scale", 1.0);
         this->declare_parameter("vla_enabled", true);
         this->declare_parameter("observation_buffer_size", 2);
         this->declare_parameter("action_timeout", 60.0);
-        this->declare_parameter("enable_depth_masking", true);
+        this->declare_parameter("enable_depth_masking", false);
         this->declare_parameter("depth_mask_threshold", 1.5); // in meters
+        this->declare_parameter("actions_per_query", 2);  
 
         frequency_ = this->get_parameter("frequency").as_double();
         linear_scale_ = this->get_parameter("linear_scale").as_double();
@@ -40,6 +41,8 @@ public:
         action_timeout_ = this->get_parameter("action_timeout").as_double();
         enable_depth_masking_ = this->get_parameter("enable_depth_masking").as_bool();
         depth_mask_threshold_ = this->get_parameter("depth_mask_threshold").as_double();
+        actions_per_query_ = this->get_parameter("actions_per_query").as_int();
+    
         gripper_state_ = true;
 
         // Subscribers for D435 main camera
@@ -54,7 +57,7 @@ public:
         // Publishers
         image_pub_ = this->create_publisher<sensor_msgs::msg::Image>("observations/image_main", 10);
         wrist_image_pub_ = this->create_publisher<sensor_msgs::msg::Image>("observations/image_wrist", 10);
-        increment_pub_ = this->create_publisher<franka_hri_interfaces::msg::Increment>("increment", 10);
+        ee_command_pub_ = this->create_publisher<franka_hri_interfaces::msg::EECommand>("ee_command", 10);
 
         // Synchronizer for color and depth images
         sync_ = std::make_shared<Synchronizer>(SyncPolicy(10), color_sub_main_, depth_sub_main_);
@@ -90,7 +93,6 @@ private:
     void imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr& color_msg,
                                    const sensor_msgs::msg::Image::ConstSharedPtr& depth_msg)
     {
-
         cv_bridge::CvImagePtr cv_color_ptr, cv_depth_ptr;
         try {
             cv_color_ptr = cv_bridge::toCvCopy(color_msg, sensor_msgs::image_encodings::BGR8);
@@ -119,7 +121,7 @@ private:
             binary_mask.convertTo(binary_mask, CV_8U);
 
             // Apply morphological operations to reduce noise
-            int morph_size = 5; // Adjust this value to control the strength of noise reduction
+            int morph_size = 5;
             cv::Mat element = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(2 * morph_size + 1, 2 * morph_size + 1));
             
             cv::Mat opened_mask, closed_mask;
@@ -198,7 +200,6 @@ private:
     void handleAccepted(const std::shared_ptr<GoalHandleDoActionModel> goal_handle)
     {
         using namespace std::placeholders;
-        // this needs to return quickly to avoid blocking the executor, so spin up a new thread
         std::thread{std::bind(&VLAControlNode::execute, this, _1), goal_handle}.detach();
     }
 
@@ -234,16 +235,51 @@ private:
             }
 
             auto vla_result = callVLAService(goal->text_command);
-            if (vla_result) {
-                sendIncrementCommand(vla_result->linear, vla_result->angular);
-                if (vla_result->gripper != gripper_state_) {
-                    sendGripperCommand(vla_result->gripper);
-                    gripper_state_ = vla_result->gripper;
+            if (vla_result && !vla_result->actions.empty()) {
+                // Check if we have enough actions
+                if (vla_result->actions.size() < static_cast<size_t>(actions_per_query_)) {
+                    RCLCPP_WARN(this->get_logger(), 
+                               "Received fewer actions than requested (%zu < %d). Executing available actions.", 
+                               vla_result->actions.size(), actions_per_query_);
+                }
+                
+                // Execute only up to actions_per_query_ actions
+                size_t num_actions_to_execute = std::min(vla_result->actions.size(), 
+                                                       static_cast<size_t>(actions_per_query_));
+                
+                for (size_t i = 0; i < num_actions_to_execute; ++i) {
+                    const auto& action = vla_result->actions[i];
+                    
+                    // Create a scaled copy of the command
+                    auto scaled_command = franka_hri_interfaces::msg::EECommand();
+                    
+                    // Apply linear scaling
+                    scaled_command.linear.x = action.linear.x * linear_scale_;
+                    scaled_command.linear.y = action.linear.y * linear_scale_;
+                    scaled_command.linear.z = action.linear.z * linear_scale_;
+                    
+                    // Apply angular scaling
+                    scaled_command.angular.x = action.angular.x * angular_scale_;
+                    scaled_command.angular.y = action.angular.y * angular_scale_;
+                    scaled_command.angular.z = action.angular.z * angular_scale_;
+                    
+                    // Gripper command doesn't need scaling
+                    scaled_command.gripper = action.gripper;
+                    
+                    // Publish the scaled command
+                    ee_command_pub_->publish(scaled_command);
+                    
+                    if (action.gripper != gripper_state_) {
+                        sendGripperCommand(!action.gripper);
+                        gripper_state_ = action.gripper;
+                    }
+                    
+                    std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(1000.0 / frequency_)));
                 }
             } else {
-                RCLCPP_ERROR(this->get_logger(), "Failed to get VLA result, aborting action");
+                RCLCPP_ERROR(this->get_logger(), "Failed to get VLA result or empty action sequence, aborting action");
                 result->success = false;
-                result->message = "VLA service call failed";
+                result->message = "VLA service call failed or returned no actions";
                 goal_handle->abort(result);
                 return;
             }
@@ -251,8 +287,6 @@ private:
             elapsed_time = (this->now() - start_time).seconds();
             feedback->progress = elapsed_time / action_timeout_ * 100.0;
             goal_handle->publish_feedback(feedback);
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(1000.0 / frequency_)));
         }
 
         if (rclcpp::ok()) {
@@ -266,15 +300,18 @@ private:
 
     void sendZeroCommand()
     {
-        geometry_msgs::msg::Vector3 zero_vector;
-        zero_vector.x = 0.0;
-        zero_vector.y = 0.0;
-        zero_vector.z = 0.0;
+        auto zero_command = franka_hri_interfaces::msg::EECommand();
+        zero_command.linear.x = 0.0;
+        zero_command.linear.y = 0.0;
+        zero_command.linear.z = 0.0;
+        zero_command.angular.x = 0.0;
+        zero_command.angular.y = 0.0;
+        zero_command.angular.z = 0.0;
+        zero_command.gripper = gripper_state_;
         
-        sendIncrementCommand(zero_vector, zero_vector);
+        ee_command_pub_->publish(zero_command);
         RCLCPP_INFO(this->get_logger(), "Sent zero command to stop movement");
     }
-
 
     std::shared_ptr<franka_hri_interfaces::srv::VLAService::Response> callVLAService(const std::string& text_command)
     {
@@ -285,7 +322,6 @@ private:
 
         auto result_future = vla_client_->async_send_request(request);
         
-        // Wait for the result with a timeout
         const auto timeout = std::chrono::seconds(20);
         if (result_future.wait_for(timeout) == std::future_status::ready) {
             return result_future.get();
@@ -293,26 +329,6 @@ private:
             RCLCPP_ERROR(this->get_logger(), "VLA service call timed out");
             return nullptr;
         }
-    }
-
-    void sendIncrementCommand(const geometry_msgs::msg::Vector3& linear, const geometry_msgs::msg::Vector3& angular)
-    {
-        auto increment_msg = franka_hri_interfaces::msg::Increment();
-
-        // Scale the linear and angular values
-        increment_msg.linear.x = linear.x * linear_scale_;
-        increment_msg.linear.y = linear.y * linear_scale_;
-        increment_msg.linear.z = linear.z * linear_scale_;
-
-        increment_msg.angular.x = angular.x * angular_scale_;
-        increment_msg.angular.y = angular.y * angular_scale_;
-        increment_msg.angular.z = angular.z * angular_scale_;
-
-        RCLCPP_INFO(this->get_logger(), "Publishing increment command: Linear (%.3f, %.3f, %.3f), Angular (%.3f, %.3f, %.3f)",
-                    increment_msg.linear.x, increment_msg.linear.y, increment_msg.linear.z,
-                    increment_msg.angular.x, increment_msg.angular.y, increment_msg.angular.z);
-
-        increment_pub_->publish(increment_msg);
     }
 
     void enableVLACallback(
@@ -331,6 +347,8 @@ private:
         goal_msg.width = open_gripper ? 0.08 : 0.02;  // 0.02 for closed, 0.08 for open
         goal_msg.speed = 0.1;  // Adjust as needed
         goal_msg.force = 0.001;  // Adjust as needed
+        goal_msg.epsilon.inner = 0.2;
+        goal_msg.epsilon.outer = 0.2;
 
         RCLCPP_INFO(this->get_logger(), "Sending gripper command: %s", open_gripper ? "Open" : "Close");
 
@@ -379,7 +397,7 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr wrist_sub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr wrist_image_pub_;
-    rclcpp::Publisher<franka_hri_interfaces::msg::Increment>::SharedPtr increment_pub_;
+    rclcpp::Publisher<franka_hri_interfaces::msg::EECommand>::SharedPtr ee_command_pub_;
     typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::Image, sensor_msgs::msg::Image> SyncPolicy;
     typedef message_filters::Synchronizer<SyncPolicy> Synchronizer;
     std::shared_ptr<Synchronizer> sync_;
@@ -394,6 +412,7 @@ private:
     bool gripper_state_;
     bool enable_depth_masking_;
     double depth_mask_threshold_;
+    int actions_per_query_;
 
     sensor_msgs::msg::Image latest_image_;
     sensor_msgs::msg::Image latest_wrist_image_;
