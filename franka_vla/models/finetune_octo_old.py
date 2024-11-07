@@ -17,24 +17,52 @@ import jax.numpy as jnp
 
 from octo.model.octo_model import OctoModel
 from octo.utils.jax_utils import initialize_compilation_cache
-from octo.utils.train_utils import process_text, TrainState
+from octo.utils.train_utils import process_text, TrainState, create_optimizer
 
 FLAGS = flags.FLAGS
 
 # Define required flags
 flags.DEFINE_string("pretrained_path", "hf://rail-berkeley/octo-base-1.5", "Path to pre-trained Octo checkpoint")
-flags.DEFINE_string("data_dir", "/home/scferro/Documents/final_project/training_data_vla", "Path to directory containing all training sessions")
-flags.DEFINE_string("save_dir", "/home/scferro/Documents/final_project/octo_models", "Directory for saving checkpoints")
-flags.DEFINE_integer("batch_size", 2, "Batch size for training")
-flags.DEFINE_integer("steps", 40000, "Steps for training")
-flags.DEFINE_float("learning_rate", 3e-6, "Learning rate for training")
+flags.DEFINE_string("data_dir", "/home/scferro/training_data_vla", "Path to directory containing all training sessions")
+flags.DEFINE_string("save_dir", "/home/scferro/checkpoints", "Directory for saving checkpoints")
+flags.DEFINE_integer("batch_size", 32, "Batch size for training")
+flags.DEFINE_integer("steps", 20000, "Steps for training")
+flags.DEFINE_float("learning_rate", 1e-5, "Learning rate for training")
 
-def load_session_data(session_dir: str, max_horizon: int = 4, sample_freq: int = 2) -> List[Dict]:
-    """
-    Load data and create sequences with:
-    - Two frames of images (t-2 and t)
-    - Four consecutive actions (t, t+1, t+2, t+3)
-    """
+class ActionProcessor:
+    def __init__(self):
+        self.stats = None
+        
+    def compute_statistics(self, all_sequences):
+        actions = []
+        for seq in all_sequences:
+            for action in seq['actions']:
+                actions.append(action)
+        actions = np.array(actions)
+        continuous = actions[:, :6]
+        
+        self.stats = {
+            'mean': np.mean(continuous, axis=0),
+            'std': np.std(continuous, axis=0)
+        }
+        return self.stats
+    
+    def normalize_actions(self, actions):
+        continuous = actions[:, :6]
+        discrete = actions[:, 6:]
+        normalized = (continuous - self.stats['mean']) / self.stats['std']
+        return np.concatenate([normalized, discrete], axis=1)
+    
+    def save_statistics(self, save_dir):
+        stats_path = os.path.join(save_dir, 'action_stats.json')
+        with open(stats_path, 'w') as f:
+            json.dump({
+                'mean': self.stats['mean'].tolist(),
+                'std': self.stats['std'].tolist()
+            }, f)
+
+def load_raw_session_data(session_dir: str, max_horizon: int = 4, sample_freq: int = 2) -> List[Dict]:
+    """Load raw session data without normalization"""
     jsonl_path = os.path.join(session_dir, "data.jsonl")
     sequences = []
     full_sequence = []
@@ -48,15 +76,26 @@ def load_session_data(session_dir: str, max_horizon: int = 4, sample_freq: int =
             full_sequence.append(data)
     
     for current_idx in range(sample_freq, len(full_sequence) - (max_horizon - 1)):
-        prev_frame_idx = current_idx - sample_freq
+        actions = [full_sequence[i]['action'] 
+                  for i in range(current_idx, current_idx + max_horizon)]
         
         sequence = {
             'current_frame': full_sequence[current_idx],
-            'prev_frame': full_sequence[prev_frame_idx],
-            'actions': [full_sequence[i]['action'] 
-                       for i in range(current_idx, current_idx + max_horizon)],
+            'prev_frame': full_sequence[current_idx - sample_freq],
+            'actions': actions,
         }
         sequences.append(sequence)
+    
+    return sequences
+
+def load_session_data(session_dir: str, action_processor, max_horizon: int = 4, sample_freq: int = 2) -> List[Dict]:
+    """Load and normalize session data"""
+    sequences = load_raw_session_data(session_dir, max_horizon, sample_freq)
+    
+    if action_processor is not None:
+        for sequence in sequences:
+            actions = np.array(sequence['actions'])
+            sequence['actions'] = action_processor.normalize_actions(actions)
     
     return sequences
 
@@ -149,10 +188,25 @@ def create_tf_dataset(sequences: List[Dict], batch_size: int, max_horizon: int =
 def create_train_state(model):
     """Initialize training state with optimizer."""
     lr = FLAGS.learning_rate
-    learning_rate = optax.join_schedules(
-        [optax.linear_schedule(0, lr, 100), optax.constant_schedule(lr)], [100]
+    
+    frozen_keys = [
+        "octo_transformer.*",
+        "task_preprocessor.*", 
+        "observation_preprocessor.*"
+    ]
+
+    # Create flat mask for parameters
+    flat_params = flax.traverse_util.flatten_dict(model.params)
+    trainable = {k: not any(pattern in k for pattern in frozen_keys) 
+                for k in flat_params.keys()}
+    
+    # Create the optimizers
+    tx = optax.chain(
+        optax.masked(
+            optax.sgd(learning_rate=lr),
+            mask=flax.traverse_util.unflatten_dict(trainable)
+        )
     )
-    tx = optax.adamw(learning_rate)
     
     state = TrainState.create(
         rng=jax.random.PRNGKey(1234),
@@ -213,15 +267,28 @@ def main(_):
     logging.info("Loading pre-trained model...")
     model = OctoModel.load_pretrained(FLAGS.pretrained_path)
     
-    # Load training data
-    logging.info("Loading training data...")
-    all_sequences = []
+    # Initialize action processor
+    action_processor = ActionProcessor()
+    
+    # Load raw sequences first to compute statistics
+    raw_sequences = []
     session_dirs = glob.glob(os.path.join(FLAGS.data_dir, "session_*"))
-    logging.info(f"Found {len(session_dirs)} session directories")
     for session_dir in session_dirs:
-        sequences = load_session_data(session_dir)
+        sequences = load_raw_session_data(session_dir)
+        raw_sequences.extend(sequences)
+
+    # Compute and save statistics
+    stats = action_processor.compute_statistics(raw_sequences)
+    action_processor.save_statistics(FLAGS.save_dir)
+
+    # Update model's statistics for inference
+    model.dataset_statistics["bridge_dataset"]["action"] = stats
+
+    # Now load normalized sequences
+    all_sequences = []
+    for session_dir in session_dirs:
+        sequences = load_session_data(session_dir, action_processor)
         all_sequences.extend(sequences)
-    logging.info(f"Created total of {len(all_sequences)} sequences")
     
     # Create dataset and iterator
     train_dataset = create_tf_dataset(all_sequences, FLAGS.batch_size)
@@ -238,55 +305,66 @@ def main(_):
             state.model.params, batch, dropout_rng, train=True
         )
         new_state = state.apply_gradients(grads=grads, rng=rng)
-        # Delete gradients explicitly
         del grads
-        return new_state, info
+        return new_state, info, loss  # Return loss explicitly
     
-    steps = FLAGS.steps
-
-    # Training loop
+    # Initialize running average
+    ema_loss = None
+    ema_alpha = 0.98  # Smoothing factor: higher = smoother
+    
     logging.info("Starting training...")
-    for i in tqdm.tqdm(range(steps), total=steps, dynamic_ncols=True):
-        try:
-            batch = next(train_iter)
-        except StopIteration:
-            train_iter = iter(train_dataset)
-            batch = next(train_iter)
-            gc.collect()  # Force garbage collection at dataset reset
-        
-        # Process batch
-        if isinstance(batch['task']['language_instruction'], tf.Tensor):
-            batch['task']['language_instruction'] = batch['task']['language_instruction'].numpy()
-        batch = process_text(batch, model.text_processor)
-        jax_batch = convert_batch_to_jax(batch)
-        
-        # Clear original batch data
-        del batch
-        
-        # Single training step
-        train_state, update_info = train_step(train_state, jax_batch)
-        
-        # Clear batch data
-        del jax_batch
-        
-        # Logging
-        if (i + 1) % 100 == 0:
-            # Get info and immediately convert to python primitives
-            update_info = jax.device_get(update_info)
-            info_dict = flax.traverse_util.flatten_dict({"training": update_info}, sep="/")
-            wandb.log(info_dict, step=i)
-            del update_info, info_dict
-
-        # Clear caches
-        if (i + 1) % 500 == 0:
-            gc.collect()        # Force garbage collection
-            jax.clear_caches()  # Clear JIT caches
-        
-        # Checkpointing
-        if (i + 1) % 1000 == 0:
-            train_state.model.save_pretrained(step=i, checkpoint_path=FLAGS.save_dir)
-            gc.collect()
-            jax.clear_caches()
+    steps = FLAGS.steps
+    with tqdm.tqdm(total=steps, dynamic_ncols=True) as pbar:
+        for i in range(steps):
+            try:
+                batch = next(train_iter)
+            except StopIteration:
+                train_iter = iter(train_dataset)
+                batch = next(train_iter)
+                gc.collect()
+            
+            # Process batch
+            if isinstance(batch['task']['language_instruction'], tf.Tensor):
+                batch['task']['language_instruction'] = batch['task']['language_instruction'].numpy()
+            batch = process_text(batch, model.text_processor)
+            jax_batch = convert_batch_to_jax(batch)
+            del batch
+            
+            # Single training step
+            train_state, update_info, batch_loss = train_step(train_state, jax_batch)
+            del jax_batch
+            
+            # Update running average
+            batch_loss = float(batch_loss)  # Convert to Python float
+            if ema_loss is None:
+                ema_loss = batch_loss
+            else:
+                ema_loss = ema_alpha * ema_loss + (1 - ema_alpha) * batch_loss
+                
+            # Logging
+            if (i + 1) % 50 == 0:
+                try:
+                    # Only log loss values
+                    wandb.log({
+                        "loss/batch": float(batch_loss),
+                        "loss/smooth": float(ema_loss),
+                    }, step=i)
+                except Exception as e:
+                    logging.warning(f"Logging failed: {e}")
+            
+            # Update progress bar with smoothed loss
+            pbar.set_postfix({
+                'smooth_loss': f"{ema_loss:.4f}",
+                'batch_loss': f"{batch_loss:.4f}",
+                'step': i + 1
+            })
+            pbar.update(1)  # Manually update progress
+            
+            # Checkpointing
+            if (i + 1) % 1000 == 0:
+                train_state.model.save_pretrained(step=i, checkpoint_path=FLAGS.save_dir)
+                gc.collect()
+                jax.clear_caches()
 
 if __name__ == "__main__":
     flags.FLAGS([""])  # Initialize flags

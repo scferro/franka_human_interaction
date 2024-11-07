@@ -31,7 +31,7 @@ public:
         this->declare_parameter("action_timeout", 60.0);
         this->declare_parameter("enable_depth_masking", false);
         this->declare_parameter("depth_mask_threshold", 1.5); // in meters
-        this->declare_parameter("actions_per_query", 2);  
+        this->declare_parameter("actions_per_query", 4);  
 
         frequency_ = this->get_parameter("frequency").as_double();
         linear_scale_ = this->get_parameter("linear_scale").as_double();

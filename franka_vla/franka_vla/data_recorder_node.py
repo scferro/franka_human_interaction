@@ -16,6 +16,10 @@ import time
 from datetime import datetime
 import os
 from pathlib import Path
+import tf2_ros
+from geometry_msgs.msg import TransformStamped
+from tf2_ros import TransformException
+import numpy as np
 
 class DataRecorderNode(Node):
     def __init__(self):
@@ -33,13 +37,20 @@ class DataRecorderNode(Node):
         self.session_dir = os.path.join(self.base_path, f'session_{timestamp}')
         self.main_image_dir = os.path.join(self.session_dir, 'main_images')
         self.wrist_image_dir = os.path.join(self.session_dir, 'wrist_images')
+        self.main_depth_dir = os.path.join(self.session_dir, 'main_depth')
+        self.wrist_depth_dir = os.path.join(self.session_dir, 'wrist_depth')
         
         # Create directories
-        for dir_path in [self.session_dir, self.main_image_dir, self.wrist_image_dir]:
+        for dir_path in [self.session_dir, self.main_image_dir, self.wrist_image_dir, 
+                        self.main_depth_dir, self.wrist_depth_dir]:
             Path(dir_path).mkdir(parents=True, exist_ok=True)
         
         # Initialize CV bridge
         self.bridge = CvBridge()
+        
+        # Initialize tf2 buffer and listener
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         
         # Create data file
         self.data_file = open(os.path.join(self.session_dir, 'data.jsonl'), 'w')
@@ -57,6 +68,19 @@ class DataRecorderNode(Node):
             self.wrist_image_callback,
             10)
             
+        # Add depth image subscribers
+        self.main_depth_sub = self.create_subscription(
+            Image,
+            '/camera/d435i/depth/image_rect_raw',
+            self.main_depth_callback,
+            10)
+            
+        self.wrist_depth_sub = self.create_subscription(
+            Image,
+            '/camera/d405/depth/image_rect_raw',
+            self.wrist_depth_callback,
+            10)
+            
         self.ee_command_sub = self.create_subscription(
             EECommand,
             '/ee_command',
@@ -66,6 +90,8 @@ class DataRecorderNode(Node):
         # Initialize latest data holders
         self.latest_main_image = None
         self.latest_wrist_image = None
+        self.latest_main_depth = None
+        self.latest_wrist_depth = None
         self.latest_ee_command = None
         self.frame_count = 0
         
@@ -84,6 +110,7 @@ class DataRecorderNode(Node):
         self.countdown_thread = threading.Thread(target=self.countdown_and_start)
         self.countdown_thread.start()
 
+    
     def countdown_and_start(self):
         self.get_logger().info(f'\nRecording will begin in:')
         for i in range(3, 0, -1):
@@ -95,6 +122,32 @@ class DataRecorderNode(Node):
         # Create timer for recording at specified frequency
         self.is_recording = True
         self.timer = self.create_timer(1.0/self.frequency, self.record_data)
+
+
+    def main_depth_callback(self, msg):
+        try:
+            depth_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
+            self.latest_main_depth = depth_image
+        except Exception as e:
+            self.get_logger().error(f'Error converting main depth image: {str(e)}')
+
+    def wrist_depth_callback(self, msg):
+        try:
+            depth_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
+            self.latest_wrist_depth = depth_image
+        except Exception as e:
+            self.get_logger().error(f'Error converting wrist depth image: {str(e)}')
+
+    def get_ee_transform(self):
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                'panda_link0',  # source frame
+                'panda_hand',   # target frame
+                rclpy.time.Time())
+            return transform
+        except TransformException as ex:
+            self.get_logger().warn(f'Could not get transform: {str(ex)}')
+            return None
 
     def main_image_callback(self, msg):
         try:
@@ -117,16 +170,37 @@ class DataRecorderNode(Node):
         if not self.is_recording:
             return
             
-        if self.latest_main_image is None or self.latest_wrist_image is None:
-            self.get_logger().warn('Waiting for images...')
+        if (self.latest_main_image is None or self.latest_wrist_image is None or
+            self.latest_main_depth is None or self.latest_wrist_depth is None):
+            self.get_logger().warn('Waiting for all images...')
             return
         
-        # Save images
+        # Save color images
         main_image_path = os.path.join(self.main_image_dir, f'frame_{self.frame_count:06d}.png')
         wrist_image_path = os.path.join(self.wrist_image_dir, f'frame_{self.frame_count:06d}.png')
         
+        # Save depth images
+        main_depth_path = os.path.join(self.main_depth_dir, f'frame_{self.frame_count:06d}.png')
+        wrist_depth_path = os.path.join(self.wrist_depth_dir, f'frame_{self.frame_count:06d}.png')
+        
         cv2.imwrite(main_image_path, self.latest_main_image)
         cv2.imwrite(wrist_image_path, self.latest_wrist_image)
+        cv2.imwrite(main_depth_path, self.latest_main_depth)
+        cv2.imwrite(wrist_depth_path, self.latest_wrist_depth)
+        
+        # Get end-effector transform
+        transform = self.get_ee_transform()
+        proprioception = [0.0] * 7  # x, y, z, qx, qy, qz, qw
+        if transform is not None:
+            proprioception = [
+                transform.transform.translation.x,
+                transform.transform.translation.y,
+                transform.transform.translation.z,
+                transform.transform.rotation.x,
+                transform.transform.rotation.y,
+                transform.transform.rotation.z,
+                transform.transform.rotation.w
+            ]
         
         # Create action vector (defaults to zeros if no command received)
         action_vector = [0.0] * 7  # 6 for movement + 1 for gripper
@@ -144,7 +218,10 @@ class DataRecorderNode(Node):
             'prompt': self.prompt,
             'main_image': os.path.relpath(main_image_path, self.session_dir),
             'wrist_image': os.path.relpath(wrist_image_path, self.session_dir),
+            'main_depth': os.path.relpath(main_depth_path, self.session_dir),
+            'wrist_depth': os.path.relpath(wrist_depth_path, self.session_dir),
             'action': action_vector,
+            'proprioception': proprioception,
             'timestamp': self.get_clock().now().to_msg().sec
         }
         

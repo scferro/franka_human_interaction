@@ -25,8 +25,7 @@ find_package(trajectory_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_eigen REQUIRED)
 find_package(std_srvs REQUIRED)
-find_package(OpenCV REQUIRED)
-find_package(cv_bridge REQUIRED)
+find_package(OpenCV REQUIREDz
 find_package(message_filters REQUIRED)
 find_package(Eigen3 REQUIRED)
 

@@ -1,6 +1,10 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.callback_groups import ReentrantCallbackGroup
+import glob
+import os
+import json
+import pprint
 
 from franka_hri_interfaces.srv import VLAService
 from franka_hri_interfaces.msg import EECommand
@@ -18,28 +22,91 @@ class VLANode(Node):
         super().__init__('vla_node')
         self.get_logger().info('Initializing VLA Service Node')
 
-        # Add parameter for number of actions to return
+        # Add parameters
         self.declare_parameter('num_actions', 4)
+        self.declare_parameter('checkpoint_dir', '/home/scferro/Documents/final_project/checkpoints_2')
+        self.declare_parameter('checkpoint_step', -1)
+        
         self.num_actions = self.get_parameter('num_actions').value
+        checkpoint_dir = self.get_parameter('checkpoint_dir').value
+        checkpoint_step = self.get_parameter('checkpoint_step').value
 
-        # Load the pre-trained OctoModel
-        self.get_logger().info('Loading pre-trained OctoModel')
+        # Load the checkpoint and statistics
+        self.get_logger().info('Loading Octo checkpoint and statistics')
         try:
-            self.model = OctoModel.load_pretrained("hf://rail-berkeley/octo-base-1.5")
-            self.get_logger().info('OctoModel loaded successfully')
+            if not checkpoint_dir:
+                raise ValueError("checkpoint_dir parameter must be set")
+            
+            # Load action statistics first
+            action_stats_path = os.path.join(checkpoint_dir, 'action_stats.json')
+            if not os.path.exists(action_stats_path):
+                raise ValueError(f"Action statistics not found at {action_stats_path}")
+            
+            self.get_logger().info(f'Loading action statistics from {action_stats_path}')
+            with open(action_stats_path, 'r') as f:
+                action_stats = json.load(f)
+                
+            # Convert to numpy arrays and construct the dataset_statistics structure
+            self.dataset_statistics = {
+                "bridge_dataset": {
+                    "action": {
+                        "mean": np.array(action_stats["mean"], dtype=np.float32),
+                        "std": np.array(action_stats["std"], dtype=np.float32),
+                        "mask": np.ones(len(action_stats["mean"]), dtype=bool)  # All dimensions are valid
+                    }
+                }
+            }
+            
+            # Print statistics information
+            self.log_statistics_info()
+            
+            def is_valid_checkpoint(step_dir):
+                """Check if directory contains a valid checkpoint."""
+                default_dir = os.path.join(checkpoint_dir, step_dir, 'default')
+                if not os.path.isdir(default_dir):
+                    return False
+                if not os.path.exists(os.path.join(default_dir, 'checkpoint')):
+                    return False
+                required_files = ['config.json']
+                for file in required_files:
+                    if not os.path.exists(os.path.join(checkpoint_dir, file)):
+                        return False
+                return True
+            
+            # Get all potential checkpoint directories (numbered directories)
+            checkpoints = [d for d in os.listdir(checkpoint_dir) 
+                         if d.isdigit() and is_valid_checkpoint(d)]
+            
+            if not checkpoints:
+                raise ValueError(f"No valid checkpoints found in {checkpoint_dir}")
+                
+            if checkpoint_step < 0:
+                # Find latest valid checkpoint
+                latest_step = max(int(d) for d in checkpoints)
+                checkpoint_path = os.path.join(checkpoint_dir, str(latest_step), 'default')
+                self.get_logger().info(f'Using latest checkpoint: step {latest_step}')
+            else:
+                # Use specific checkpoint
+                checkpoint_path = os.path.join(checkpoint_dir, str(checkpoint_step), 'default')
+                if not os.path.exists(checkpoint_path) or not is_valid_checkpoint(str(checkpoint_step)):
+                    raise ValueError(f"Valid checkpoint not found for step {checkpoint_step}")
+                self.get_logger().info(f'Using checkpoint step {checkpoint_step}')
+
+            # Initialize the model with the root config.json
+            config_path = os.path.join(checkpoint_dir, 'config.json')
+            self.get_logger().info(f'Loading config from: {config_path}')
+            
+            # Load the model with the checkpoint directory as the base path
+            self.model = OctoModel.load_pretrained(checkpoint_dir)
+            self.get_logger().info('Checkpoint loaded successfully')
+
         except Exception as e:
-            self.get_logger().error(f'Failed to load OctoModel: {str(e)}')
+            self.get_logger().error(f'Failed to load checkpoint: {str(e)}')
             raise
 
-        # self.get_logger().info(str(self.model.config))
-
-        # CV Bridge for converting between ROS and OpenCV images
+        # Initialize remaining components
         self.cv_bridge = CvBridge()
-
-        # Create a callback group for the service
         self.cb_group = ReentrantCallbackGroup()
-
-        # Service
         self.vla_service = self.create_service(
             VLAService,
             'vla_service',
@@ -48,6 +115,53 @@ class VLANode(Node):
         )
 
         self.get_logger().info(f'VLA Service Node has been fully initialized (returning {self.num_actions} actions per request)')
+
+    def log_statistics_info(self):
+        """Log detailed information about loaded statistics."""
+        try:
+            self.get_logger().info("=== Dataset Statistics Information ===")
+            
+            # Check if bridge_dataset exists
+            if 'bridge_dataset' not in self.dataset_statistics:
+                self.get_logger().error("Missing 'bridge_dataset' in statistics!")
+                return
+            
+            bridge_stats = self.dataset_statistics['bridge_dataset']
+            self.get_logger().info("Found bridge_dataset statistics")
+            
+            # Check if action statistics exist
+            if 'action' not in bridge_stats:
+                self.get_logger().error("Missing 'action' in bridge_dataset statistics!")
+                return
+            
+            action_stats = bridge_stats['action']
+            self.get_logger().info("Action statistics found")
+            
+            # Print action statistics details
+            self.get_logger().info("\nAction Statistics Structure:")
+            for key, value in action_stats.items():
+                if isinstance(value, np.ndarray):
+                    self.get_logger().info(f"  {key}: shape={value.shape}, dtype={value.dtype}")
+                    self.get_logger().info(f"    values: min={np.min(value):.4f}, max={np.max(value):.4f}, mean={np.mean(value):.4f}")
+                else:
+                    self.get_logger().info(f"  {key}: {type(value)}")
+                    if isinstance(value, (list, tuple)):
+                        self.get_logger().info(f"    length: {len(value)}")
+                    try:
+                        self.get_logger().info(f"    value: {value}")
+                    except Exception:
+                        self.get_logger().info("    (value too complex to display)")
+            
+            # Print available keys at each level
+            self.get_logger().info("\nAvailable Keys:")
+            self.get_logger().info(f"Top level: {list(self.dataset_statistics.keys())}")
+            self.get_logger().info(f"bridge_dataset level: {list(bridge_stats.keys())}")
+            self.get_logger().info(f"action level: {list(action_stats.keys())}")
+            
+            self.get_logger().info("=== End Statistics Information ===")
+            
+        except Exception as e:
+            self.get_logger().error(f"Error while logging statistics: {str(e)}")
 
     def crop_and_resize_image(self, image, target_size):
         """
@@ -107,7 +221,7 @@ class VLANode(Node):
             actions = self.model.sample_actions(
                 observation, 
                 current_goal, 
-                unnormalization_statistics=self.model.dataset_statistics["bridge_dataset"]["action"], 
+                unnormalization_statistics=self.dataset_statistics["bridge_dataset"]["action"], 
                 rng=jax.random.PRNGKey(0)
             )
             

@@ -26,8 +26,8 @@ def generate_launch_description():
         name="vla_control_node",
         parameters=[{
             "frequency": 4.0,
-            "linear_scale": 10.0,
-            "angular_scale": 4.0,
+            "linear_scale": 2.0,
+            "angular_scale": 1.0,
             "vla_enabled": True,
             "observation_buffer_size": 2,
             "action_timeout": 100.0,
