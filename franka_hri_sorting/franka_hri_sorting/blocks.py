@@ -1,8 +1,10 @@
+#!/usr/bin/env python3
+
 """
 Blocks node for object detection and manipulation.
 
-This node processes camera images to detect and track blocks, manages a neural network
-for block classification, and provides services for block manipulation and network training.
+This node processes camera images to detect and track blocks. Network operations
+are handled by the separate network_node.
 
 PUBLISHERS:
     + img_out (sensor_msgs/Image): Processed image with detected blocks
@@ -16,13 +18,7 @@ SUBSCRIBERS:
 SERVICES:
     + scan_overhead (franka_hri_interfaces/UpdateMarkers): Scans for blocks and updates markers
     + update_markers (franka_hri_interfaces/UpdateMarkers): Updates existing block markers
-    + pretrain_network (std_srvs/Empty): Pretrains the neural network
     + reset_blocks (std_srvs/Empty): Resets block data
-    + train_network (franka_hri_interfaces/SortNet): Trains the neural network
-    + get_network_prediction (franka_hri_interfaces/SortNet): Gets prediction from the neural network
-
-PARAMETERS:
-    None
 """
 
 import cv2
@@ -40,9 +36,7 @@ import tf_transformations
 from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
 from tf2_ros import TransformBroadcaster, Buffer, TransformListener
 from tf2_geometry_msgs.tf2_geometry_msgs import do_transform_point
-from franka_hri_sorting.network import SortingNet
 import torchvision.transforms as transforms
-import torch
 
 class Blocks(Node):
     def __init__(self):
@@ -55,7 +49,6 @@ class Blocks(Node):
         self._setup_transforms()
         self._init_yolo()
         self._init_bridge()
-        self._init_network()
 
     def _init_parameters(self):
         """Initialize node parameters and variables."""
@@ -65,8 +58,6 @@ class Blocks(Node):
         self.block_markers = MarkerArray()
         self.block_images = []
         self.fx = self.fy = self.cx = self.cy = None
-        self.image_tensors = []
-        self.label_tensors = []
         self.timer_count = 0.0
 
     def _setup_subscribers(self):
@@ -84,10 +75,11 @@ class Blocks(Node):
         """Set up ROS services."""
         self.create_service(UpdateMarkers, 'scan_overhead', self._scan_overhead_callback)
         self.create_service(UpdateMarkers, 'update_markers', self._update_markers_callback)
-        self.create_service(Empty, 'pretrain_network', self._pretrain_network_callback)
         self.create_service(Empty, 'reset_blocks', self._reset_blocks_callback)
-        self.create_service(SortNet, 'train_network', self._train_network_callback)
-        self.create_service(SortNet, 'get_network_prediction', self._get_network_prediction_callback)
+        
+        # Create clients for the network services
+        self.train_sorting_client = self.create_client(SortNet, 'train_sorting')
+        self.get_sorting_prediction_client = self.create_client(SortNet, 'get_sorting_prediction')
 
     def _setup_timers(self):
         """Set up ROS timers."""
@@ -110,9 +102,26 @@ class Blocks(Node):
         """Initialize CvBridge for image conversion."""
         self.bridge = CvBridge()
 
-    def _init_network(self):
-        """Initialize the sorting neural network."""
-        self.network = SortingNet()
+    def _make_static_transforms(self):
+        """Publish static transforms for the camera and world frames."""
+        t_cam = TransformStamped()
+        t_cam.header.stamp = self.get_clock().now().to_msg()
+        t_cam.header.frame_id = 'panda_hand'
+        t_cam.child_frame_id = 'd405_link'
+        t_cam.transform.translation.x, t_cam.transform.translation.y, t_cam.transform.translation.z = 0.07, 0.0, 0.05
+        t_cam.transform.rotation.x, t_cam.transform.rotation.y = 0.0, 0.0
+        t_cam.transform.rotation.z, t_cam.transform.rotation.w = 0.7071068, 0.7071068
+
+        t_world = TransformStamped()
+        t_world.header.stamp = self.get_clock().now().to_msg()
+        t_world.header.frame_id = 'world'
+        t_world.child_frame_id = 'panda_link0'
+        t_world.transform.translation.x = t_world.transform.translation.y = t_world.transform.translation.z = 0.0
+        t_world.transform.rotation.x = t_world.transform.rotation.y = t_world.transform.rotation.z = 0.0
+        t_world.transform.rotation.w = 1.0
+
+        self.tf_static_broadcaster.sendTransform([t_cam, t_world])
+        self.get_logger().info("Published static transforms.")
 
     def _image_callback(self, msg):
         """Callback for receiving color images."""
@@ -148,6 +157,23 @@ class Blocks(Node):
         self.img_msg_out = self._cv2_to_ros2_image(img_with_boxes)
         self.get_logger().info('Block scanning complete!')
 
+        return response
+
+    def _update_markers_callback(self, request, response):
+        """Service callback to update markers."""
+        new_markers = request.input_markers.markers
+        marker_index_list = request.markers_to_update
+
+        for i, index in enumerate(marker_index_list):
+            self.block_markers.markers[index] = new_markers[i]
+
+        response.output_markers = self.block_markers
+        return response
+
+    def _reset_blocks_callback(self, request, response):
+        """Reset block data."""
+        self.block_markers = MarkerArray()
+        self.block_images = []
         return response
 
     def _scan_overhead(self, markers, markers_to_update, update_scale):
@@ -351,13 +377,7 @@ class Blocks(Node):
     def _update_or_add_marker(self, marker, markers, markers_to_update, update_scale, resized_image):
         """
         Update an existing marker or add a new one.
-
-        Args:
-            marker (Marker): New marker
-            markers (MarkerArray): Existing markers
-            markers_to_update (list): Indices of markers to update
-            update_scale (bool): Whether to update marker scale
-            resized_image (np.array): Resized image of the block
+        [Previous docstring remains the same]
         """
         similar_marker_index = self._find_similar_marker(marker, markers)
 
@@ -370,205 +390,11 @@ class Blocks(Node):
         if similar_marker_index == -1 and update_marker:
             marker.id = len(markers.markers)
             markers.markers.append(marker)
-            self.block_images.append([resized_image])
+            self.block_images.append([resized_image])  # Store the CV2 image directly
         elif update_marker:
             marker.id = markers.markers[similar_marker_index].id
             markers.markers[similar_marker_index] = marker
-            self.block_images[similar_marker_index].append(resized_image)
-
-    def _update_markers_callback(self, request, response):
-        """
-        Service callback to update markers.
-
-        Args:
-            request (UpdateMarkers.Request): Service request
-            response (UpdateMarkers.Response): Service response
-
-        Returns:
-            UpdateMarkers.Response: Updated response
-        """
-        new_markers = request.input_markers.markers
-        marker_index_list = request.markers_to_update
-
-        for i, index in enumerate(marker_index_list):
-            self.block_markers.markers[index] = new_markers[i]
-
-        response.output_markers = self.block_markers
-        return response
-
-    def _pretrain_network_callback(self, request, response):
-        """
-        Service callback to pretrain the neural network.
-
-        Args:
-            request (Empty.Request): Service request
-            response (Empty.Response): Service response
-
-        Returns:
-            Empty.Response: Service response
-        """
-        self.block_markers = MarkerArray()
-        self.block_images = []
-        self.image_tensors = []
-        self.label_tensors = []
-
-        marker_array, img_with_boxes = self._scan_overhead(self.block_markers, [], True)
-
-        img_with_boxes_msg = self._cv2_to_ros2_image(img_with_boxes)
-        self.img_msg_out = img_with_boxes_msg
-
-        markers = marker_array.markers
-
-        for i, marker in enumerate(markers):
-            images = self.block_images[i]
-            
-            label = 0 if marker.pose.position.y >= 0 else 1
-
-            for img in images:
-                transformed_images = self._transform_image(img)
-                for img_tf in transformed_images:
-                    img_tensor = self._preprocess_image(img_tf)
-                    label_tensor = torch.tensor([[label]], dtype=torch.float32)
-                    self.image_tensors.append(img_tensor)
-                    self.label_tensors.append(label_tensor)
-        
-        iterations = 10
-        for _ in range(iterations):
-            self.network.train_network(self.image_tensors, self.label_tensors)
-
-        self.get_logger().info("Pre-trained network.")
-        self.block_images = []
-        self.block_markers = MarkerArray()
-        return response
-
-    def _reset_blocks_callback(self, request, response):
-        """
-        Service callback to reset block data.
-
-        Args:
-            request (Empty.Request): Service request
-            response (Empty.Response): Service response
-
-        Returns:
-            Empty.Response: Service response
-        """
-        self.block_markers = MarkerArray()
-        self.block_images = []
-        self.image_tensors = []
-        self.label_tensors = []
-        return response
-
-    def _train_network_callback(self, request, response):
-        """
-        Service callback to train the neural network.
-
-        Args:
-            request (SortNet.Request): Service request
-            response (SortNet.Response): Service response
-
-        Returns:
-            SortNet.Response: Service response
-        """
-        block_index = request.index
-        label = request.label
-
-        images = self.block_images[block_index]
-        
-        for img in images:
-            transformed_images = self._transform_image(img)
-            for img_tf in transformed_images:
-                img_tensor = self._preprocess_image(img_tf)
-                label_tensor = torch.tensor([[label]], dtype=torch.float32)
-                self.image_tensors.append(img_tensor)
-                self.label_tensors.append(label_tensor)
-
-        max_images = 50
-        if len(self.image_tensors) > max_images:
-            self.image_tensors = self.image_tensors[-100:-1]
-            self.label_tensors = self.label_tensors[-100:-1]
-
-        self.network.train_network(self.image_tensors, self.label_tensors)
-        self.get_logger().info("Trained network.")
-
-        return response
-
-    def _get_network_prediction_callback(self, request, response):
-        """
-        Service callback to get a prediction from the neural network.
-
-        Args:
-            request (SortNet.Request): Service request
-            response (SortNet.Response): Service response
-
-        Returns:
-            SortNet.Response: Service response with prediction
-        """
-        block_index = request.index
-        images = self.block_images[block_index]
-
-        pred_list = []
-        for img in images:
-            img_tensor = self._preprocess_image(img)
-            pred = self.network.forward(img_tensor)
-            pred_list.append(pred.detach().numpy()) 
-
-        response.prediction = float(np.mean(pred_list)) 
-        self.get_logger().info(f"Prediction: {float(np.mean(pred_list))}")
-        return response
-
-    def _preprocess_image(self, image):
-        """
-        Preprocess an image for the neural network.
-
-        Args:
-            image (np.array): Input image
-
-        Returns:
-            torch.Tensor: Preprocessed image tensor
-        """
-        transform = transforms.Compose([
-            transforms.ToPILImage(),
-            transforms.Resize((128, 128)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
-
-        image_tensor = transform(image)
-        return image_tensor.unsqueeze(0)
-
-    def _get_position_from_image(self, u, v, depth_cv_image):
-        """
-        Get 3D position from image coordinates and depth.
-
-        Args:
-            u, v (int): Image coordinates
-            depth_cv_image (np.array): Depth image
-
-        Returns:
-            list: 3D position [X, Y, Z]
-        """
-        if self.fx is None or self.fy is None or self.cx is None or self.cy is None:
-            self.get_logger().warn('Camera info not yet received.')
-            return
-
-        depth_array = np.array(depth_cv_image, dtype=np.float32)
-        depth_height, depth_width = depth_array.shape
-
-        u = min(u, depth_width - 1)
-        v = min(v, depth_height - 1)
-
-        half_window = 11
-        u_min, u_max = max(0, u - half_window), min(depth_array.shape[1], u + half_window + 1)
-        v_min, v_max = max(0, v - half_window), min(depth_array.shape[0], v + half_window + 1)
-
-        window = depth_array[v_min:v_max, u_min:u_max]
-        valid_depths = window[np.logical_and(window > 0, ~np.isnan(window))]
-        z = np.mean(valid_depths) / 1000.0  # Convert to meters
-
-        X = (u - self.cx) * z / self.fx
-        Y = (v - self.cy) * z / self.fy
-
-        return [X, Y, z]
+            self.block_images[similar_marker_index].append(resized_image)  # Store the CV2 image directly
 
     def _find_similar_marker(self, single_marker, marker_array, distance_threshold=0.02, size_threshold=0.03):
         """
@@ -622,53 +448,101 @@ class Blocks(Node):
         color_values = masked_color[mask > 0]
         return np.mean(color_values, axis=0)
 
-    def _make_static_transforms(self):
-        """Publish static transforms for the camera and world frames."""
-        t_cam = TransformStamped()
-        t_cam.header.stamp = self.get_clock().now().to_msg()
-        t_cam.header.frame_id = 'panda_hand'
-        t_cam.child_frame_id = 'd405_link'
-        t_cam.transform.translation.x, t_cam.transform.translation.y, t_cam.transform.translation.z = 0.07, 0.0, 0.05
-        t_cam.transform.rotation.x, t_cam.transform.rotation.y = 0.0, 0.0
-        t_cam.transform.rotation.z, t_cam.transform.rotation.w = 0.7071068, 0.7071068
-
-        t_world = TransformStamped()
-        t_world.header.stamp = self.get_clock().now().to_msg()
-        t_world.header.frame_id = 'world'
-        t_world.child_frame_id = 'panda_link0'
-        t_world.transform.translation.x = t_world.transform.translation.y = t_world.transform.translation.z = 0.0
-        t_world.transform.rotation.x = t_world.transform.rotation.y = t_world.transform.rotation.z = 0.0
-        t_world.transform.rotation.w = 1.0
-
-        self.tf_static_broadcaster.sendTransform([t_cam, t_world])
-        self.get_logger().info("Published static transforms.")
-
-    def _transform_image(self, image):
+    def _get_position_from_image(self, u, v, depth_cv_image):
         """
-        Apply various transformations to an image.
+        Get 3D position from image coordinates and depth.
+
+        Args:
+            u, v (int): Image coordinates
+            depth_cv_image (np.array): Depth image
+
+        Returns:
+            list: 3D position [X, Y, Z]
+        """
+        if self.fx is None or self.fy is None or self.cx is None or self.cy is None:
+            self.get_logger().warn('Camera info not yet received.')
+            return
+
+        depth_array = np.array(depth_cv_image, dtype=np.float32)
+        depth_height, depth_width = depth_array.shape
+
+        u = min(u, depth_width - 1)
+        v = min(v, depth_height - 1)
+
+        half_window = 11
+        u_min, u_max = max(0, u - half_window), min(depth_array.shape[1], u + half_window + 1)
+        v_min, v_max = max(0, v - half_window), min(depth_array.shape[0], v + half_window + 1)
+
+        window = depth_array[v_min:v_max, u_min:u_max]
+        valid_depths = window[np.logical_and(window > 0, ~np.isnan(window))]
+        z = np.mean(valid_depths) / 1000.0  # Convert to meters
+
+        X = (u - self.cx) * z / self.fx
+        Y = (v - self.cy) * z / self.fy
+
+        return [X, Y, z]
+
+    async def get_sorting_prediction(self, index):
+        """Get a prediction from the sorting network."""
+        request = SortNet.Request()
+        
+        try:
+            # Get the most recent image for this block
+            image = self.block_images[index][-1]  # Get the most recent image
+            
+            # Convert to ROS Image message
+            ros_msg = self.bridge.cv2_to_imgmsg(image, encoding='rgb8')
+            request.image = ros_msg
+            
+            while not self.get_sorting_prediction_client.wait_for_service(timeout_sec=1.0):
+                self.get_logger().warn('Sorting prediction service not available...')
+                
+            response = await self.get_sorting_prediction_client.call_async(request)
+            return response.prediction
+            
+        except Exception as e:
+            self.get_logger().error(f'Failed to get sorting prediction: {str(e)}')
+            return -1
+
+    async def train_sorting_network(self, index, label):
+        """Train the sorting network."""
+        request = SortNet.Request()
+        
+        try:
+            # Get the most recent image for this block
+            image = self.block_images[index][-1]  # Get the most recent image
+            
+            # Convert to ROS Image message
+            ros_msg = self.bridge.cv2_to_imgmsg(image, encoding='rgb8')
+            request.image = ros_msg
+            request.label = label
+            
+            while not self.train_sorting_client.wait_for_service(timeout_sec=1.0):
+                self.get_logger().warn('Sorting training service not available...')
+                
+            response = await self.train_sorting_client.call_async(request)
+            self.get_logger().info('Trained sorting network')
+            
+        except Exception as e:
+            self.get_logger().error(f'Failed to train sorting network: {str(e)}')
+
+    def _preprocess_image(self, image):
+        """
+        Preprocess an image for the network.
 
         Args:
             image (np.array): Input image
 
         Returns:
-            list: List of transformed images
+            torch.Tensor: Preprocessed image tensor
         """
-        height, width = image.shape[:2]
-
-        def rotate_image(image, angle):
-            M = cv2.getRotationMatrix2D((width // 2, height // 2), angle, 1)
-            return cv2.warpAffine(image, M, (width, height))
-
-        def mirror_image(image):
-            return cv2.flip(image, 1)
-
-        transformations = []
-        for angle in [0, 90, 180, 270]:
-            rotated_image = rotate_image(image, angle)
-            mirrored_image = mirror_image(rotated_image)
-            transformations.extend([rotated_image, mirrored_image])
-
-        return transformations
+        transform = transforms.Compose([
+            transforms.ToPILImage(),
+            transforms.Resize((128, 128)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+        return transform(image)
 
     def _ros2_image_to_cv2(self, ros_image_msg, encoding='passthrough'):
         """
@@ -707,17 +581,9 @@ class Blocks(Node):
             return None
 
 def main(args=None):
-    """
-    Main function to initialize and run the Blocks node.
-
-    Args:
-        args: Command line arguments
-    """
     rclpy.init(args=args)
     node = Blocks()
-    executor = rclpy.executors.MultiThreadedExecutor()
-    executor.add_node(node)
-    executor.spin()
+    rclpy.spin(node)
     rclpy.shutdown()
 
 if __name__ == '__main__':

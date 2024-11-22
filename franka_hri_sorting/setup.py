@@ -21,7 +21,9 @@ setup(
     entry_points={
         'console_scripts': [
             'blocks = franka_hri_sorting.blocks:main',
-            'human_input = franka_hri_sorting.human_input:main'
+            'human_input = franka_hri_sorting.human_input:main',
+            'network_node = franka_hri_sorting.network_node:main',
+            'network_training = franka_hri_sorting.network_training:main',
         ],
     },
     py_modules=[

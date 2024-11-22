@@ -23,6 +23,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/CreateBox.srv"
   "srv/UpdateMarkers.srv"
   "srv/SortNet.srv"
+  "srv/GestNet.srv"
   "srv/VLAService.srv"
   "msg/EECommand.msg"
 DEPENDENCIES geometry_msgs franka_msgs visualization_msgs

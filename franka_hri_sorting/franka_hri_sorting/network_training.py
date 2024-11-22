@@ -1,142 +1,203 @@
 import os
 import random
 import cv2
-import torch
-from network import SortingNet
-import torchvision.transforms as transforms
+import numpy as np
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import Int8
+from sensor_msgs.msg import Image
+from franka_hri_interfaces.srv import SortNet, GestNet
+from cv_bridge import CvBridge, CvBridgeError
+import time
+import threading
 
-def load_random_image(folder_path):
-    """
-    Loads a random image from the specified folder using OpenCV.
+class NetworkTrainingNode(Node):
+    def __init__(self):
+        super().__init__('network_training_node')
 
-    Parameters:
-    folder_path (str): The path to the folder containing images.
+        # Initialize parameters
+        self.declare_parameter('training_images_path', '/home/scferro/Documents/final_project/training_images')
+        self.declare_parameter('display_time', 2.0)  # Time to display image in seconds
+        self.declare_parameter('prediction_timeout', 5.0)  # Maximum time to wait for prediction
+        
+        self.training_path = self.get_parameter('training_images_path').value
+        self.display_time = self.get_parameter('display_time').value
+        self.prediction_timeout = self.get_parameter('prediction_timeout').value
+        
+        if not self.training_path:
+            raise ValueError("Training images path parameter must be set")
 
-    Returns:
-    numpy.ndarray: The loaded image array.
-    """
-    # Get a list of files in the folder
-    files = os.listdir(folder_path)
-    
-    # Filter out non-image files based on common image file extensions
-    image_extensions = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.tif')
-    image_files = [file for file in files if file.lower().endswith(image_extensions)]
-    
-    # Check if there are any image files in the folder
-    if not image_files:
-        raise FileNotFoundError("No image files found in the specified folder.")
-    
-    # Select a random image file
-    random_image_file = random.choice(image_files)
-    
-    # Construct the full path to the image file
-    image_path = os.path.join(folder_path, random_image_file)
-    
-    # Load the image using cv2
-    image = cv2.imread(image_path)
-    
-    if image is None:
-        raise IOError(f"Failed to load the image file: {image_path}")
-    
-    return image
+        # Initialize CV bridge
+        self.bridge = CvBridge()
 
-def transform_image(image):
-    height, width = image.shape[:2]
+        # Create clients for network services
+        self.train_sorting_client = self.create_client(SortNet, 'train_sorting')
+        self.get_sorting_prediction_client = self.create_client(SortNet, 'get_sorting_prediction')
+        self.train_gesture_client = self.create_client(GestNet, 'train_gesture')
+        self.get_gesture_prediction_client = self.create_client(GestNet, 'get_gesture_prediction')
 
-    def rotate_image(image, angle):
-        M = cv2.getRotationMatrix2D((width // 2, height // 2), angle, 1)
-        return cv2.warpAffine(image, M, (width, height))
+        # Subscribe to human input
+        self.human_input_sub = self.create_subscription(
+            Int8,
+            'human_sorting',
+            self.human_input_callback,
+            10
+        )
 
-    def mirror_image(image):
-        return cv2.flip(image, 1)
+        # Initialize state variables
+        self.current_ros_msg = None
+        self.current_image = None
+        self.waiting_for_input = False
+        self.current_sorting_prediction = None
+        self.current_gesture_prediction = None
+        
+        # Initialize display thread
+        self.display_thread = threading.Thread(target=self.display_loop)
+        self.display_thread.daemon = True
+        self.display_thread.start()
 
-    transformations = []
-    
-    for angle in [0, 90, 180, 270]:
-        rotated_image = rotate_image(image, angle)
-        mirrored_image = mirror_image(rotated_image)
-        for img in [rotated_image, mirrored_image]:
-            transformations.append(img)
+    def display_loop(self):
+        """Separate thread for image display."""
+        cv2.namedWindow('Training Image', cv2.WINDOW_NORMAL)
+        while True:
+            if self.current_image is not None:
+                cv2.imshow('Training Image', self.current_image)
+            cv2.waitKey(1)
+            time.sleep(0.01)
 
-    return transformations
-
-def preprocess_image(image):
-    # Define the transformation pipeline
-    transform = transforms.Compose([
-        transforms.ToPILImage(),
-        transforms.Resize((128, 128)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
-
-    # Apply the transformations to the image
-    image_tensor = transform(image)
-
-    # Add a batch dimension to the tensor
-    image_tensor = image_tensor.unsqueeze(0)
-
-    return image_tensor
-
-# Set the device to CUDA if available
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# Load the SortingNet network
-network = SortingNet().to(device)
-
-# Specify the path to the folder containing images
-folder_path = "/home/scferro/Documents/final_project/training_images"
-
-image_tensors = []
-label_tensors = []
-count = 0
-
-# Main training loop
-while True:
-    print(f"Image: {count}")
-    # Load a random image from the folder
-    random_image = load_random_image(folder_path)
-
-    # Display the transformed image
-    cv2.imshow('Transformed Image', random_image)
-    cv2.waitKey(0)  # Wait for a key press to close the image window
-
-    # Create tensor
-    random_image_tensor = preprocess_image(random_image).to(device)
-    
-    # Apply transformations to the image
-    transformed_images = transform_image(random_image)
-    
-    # Get the prediction from the network
-    prediction = network.forward(random_image_tensor)
-    print(f"Prediction: {prediction.item():.4f}")
-    
-    # Prompt for user input for the correct label
-    while True:
+    def get_gesture_prediction(self):
+        """Get prediction from the gesture network."""
+        request = GestNet.Request()
+        
         try:
-            label = int(input("Enter the correct label (0 or 1): "))
-            if label in [0, 1]:
-                break
+            if not self.get_gesture_prediction_client.wait_for_service(timeout_sec=1.0):
+                self.get_logger().warn('Gesture prediction service not available')
+                return None
+
+            future = self.get_gesture_prediction_client.call_async(request)
+            rclpy.spin_until_future_complete(self, future)
+            
+            if future.result() is not None:
+                self.current_gesture_prediction = future.result().prediction
+                self.get_logger().info(f'Gesture prediction: {self.current_gesture_prediction}')
+                
+                # Use gesture prediction as initial sorting prediction
+                self.current_sorting_prediction = 1 if self.current_gesture_prediction > 0.5 else 0
+                self.waiting_for_input = True
+                self.get_logger().info(f'Initial sorting based on gesture: {self.current_sorting_prediction}')
+                self.get_logger().info('Waiting for human input (Y/N)...')
             else:
-                print("Invalid input. Please enter 0 or 1.")
-        except ValueError:
-            print("Invalid input. Please enter 0 or 1.")
-    
-    # Close the image window
-    cv2.destroyAllWindows()
+                self.get_logger().error('Failed to get gesture prediction')
+                
+        except Exception as e:
+            self.get_logger().error(f'Error getting gesture prediction: {str(e)}')
 
-    # Convert to tensors and send to device
-    for img_tf in transformed_images:
-        img_tensor = preprocess_image(img_tf).to(device)
-        label_tensor = torch.tensor([[label]], dtype=torch.float32).to(device)
-        image_tensors.append(img_tensor)
-        label_tensors.append(label_tensor)
+    def human_input_callback(self, msg):
+        """Handle human input for training both networks."""
+        if not self.waiting_for_input:
+            return
 
-    # Limit length of lists to 100 items
-    if len(image_tensors) > 200:
-        image_tensors = image_tensors[-100:]
-        label_tensors = label_tensors[-100:]
-    
-    # Train the network with the image and user-provided label
-    network.train_network(image_tensors, label_tensors)
+        key = msg.data
+        if self.current_sorting_prediction is not None:
+            if key == 1:  # Y input - prediction was correct
+                self.train_sorting_network(self.current_sorting_prediction)
+                self.train_gesture_network(self.current_sorting_prediction)
+            elif key == 0:  # N input - prediction was wrong
+                opposite_label = 1 if self.current_sorting_prediction == 0 else 0
+                self.train_sorting_network(opposite_label)
+                self.train_gesture_network(opposite_label)
 
-    count += 1
+        self.current_image = None
+        self.waiting_for_input = False
+
+    def train_gesture_network(self, label):
+        """Train the gesture network."""
+        request = GestNet.Request()
+        request.label = label
+        
+        try:
+            future = self.train_gesture_client.call_async(request)
+            self.get_logger().info(f'Training gesture network with label {label}')
+        except Exception as e:
+            self.get_logger().error(f'Failed to train gesture network: {str(e)}')
+
+    def train_sorting_network(self, label):
+        """Train the sorting network."""
+        if self.current_ros_msg is None:
+            return
+            
+        request = SortNet.Request()
+        request.image = self.current_ros_msg
+        request.label = label
+        
+        try:
+            future = self.train_sorting_client.call_async(request)
+            self.get_logger().info(f'Training sorting network with label {label}')
+        except Exception as e:
+            self.get_logger().error(f'Failed to train sorting network: {str(e)}')
+
+    def run_training(self):
+        """Main training loop."""
+        while rclpy.ok():
+            if self.waiting_for_input:
+                rclpy.spin_once(self, timeout_sec=0.1)
+                continue
+
+            # Load new random image
+            image = self.load_random_image()
+            if image is None:
+                continue
+
+            # Display image
+            self.current_image = image
+            try:
+                rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                self.current_ros_msg = self.bridge.cv2_to_imgmsg(rgb_image, encoding='rgb8')
+            except CvBridgeError as e:
+                self.get_logger().error(f'CV Bridge error: {str(e)}')
+                continue
+
+            # Get gesture prediction (the network node handles the sensor data internally)
+            if not self.get_gesture_prediction():
+                self.get_logger().warn('Skipping image due to prediction failure')
+                continue
+
+            time.sleep(self.display_time)
+
+    def load_random_image(self):
+        """Load a random image from the training folder."""
+        try:
+            files = os.listdir(self.training_path)
+            image_files = [f for f in files if f.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp'))]
+            
+            if not image_files:
+                self.get_logger().error("No image files found in the specified folder")
+                return None
+
+            random_image = random.choice(image_files)
+            image_path = os.path.join(self.training_path, random_image)
+            
+            image = cv2.imread(image_path)
+            if image is None:
+                self.get_logger().error(f"Failed to load image: {image_path}")
+                return None
+                
+            return image
+
+        except Exception as e:
+            self.get_logger().error(f'Error loading image: {str(e)}')
+            return None
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = NetworkTrainingNode()
+    try:
+        node.run_training()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()

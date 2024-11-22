@@ -24,7 +24,7 @@ class VLANode(Node):
 
         # Add parameters
         self.declare_parameter('num_actions', 4)
-        self.declare_parameter('checkpoint_dir', '/home/scferro/Documents/final_project/checkpoints_2')
+        self.declare_parameter('checkpoint_dir', '/home/scferro/Documents/final_project/checkpoints_3')
         self.declare_parameter('checkpoint_step', -1)
         
         self.num_actions = self.get_parameter('num_actions').value

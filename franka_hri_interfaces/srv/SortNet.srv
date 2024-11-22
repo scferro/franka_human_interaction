@@ -1,4 +1,6 @@
-int32 index
-int32 label
+# Request
+sensor_msgs/Image image  # Image for training/prediction
+int32 label             # Label for training (ignored for prediction)
 ---
-float32 prediction
+# Response
+float32 prediction      # Network prediction

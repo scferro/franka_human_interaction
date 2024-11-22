@@ -12,7 +12,7 @@ find_package(rclcpp_action REQUIRED)
 find_package(moveit_ros_planning_interface REQUIRED)
 find_package(moveit_core REQUIRED)
 find_package(moveit_ros_planning REQUIRED)
-find_package(moveit_servo REQUIRED)
+# find_package(moveit_servo REQUIRED)
 find_package(franka_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
@@ -25,7 +25,8 @@ find_package(trajectory_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_eigen REQUIRED)
 find_package(std_srvs REQUIRED)
-find_package(OpenCV REQUIREDz
+find_package(OpenCV REQUIRED)
+find_package(cv_bridge REQUIRED)
 find_package(message_filters REQUIRED)
 find_package(Eigen3 REQUIRED)
 
@@ -60,72 +61,72 @@ ament_target_dependencies(manipulate_blocks
   std_srvs
 )
 
-# Create the servo_control_node executable
-add_executable(servo_control_node src/servo_control_node.cpp)
-target_link_libraries(servo_control_node
-  ${tf2_LIBRARIES}
-  ${tf2_eigen_LIBRARIES}
-  ${tf2_geometry_msgs_LIBRARIES}
-  ${tf2_ros_LIBRARIES}
-)
-ament_target_dependencies(servo_control_node
-  rclcpp
-  moveit_servo
-  franka_hri_interfaces
-  std_srvs
-  tf2
-  tf2_eigen
-  tf2_geometry_msgs
-  tf2_ros
-  trajectory_msgs
-  Eigen3
-)
+# # Create the servo_control_node executable
+# add_executable(servo_control_node src/servo_control_node.cpp)
+# target_link_libraries(servo_control_node
+#   ${tf2_LIBRARIES}
+#   ${tf2_eigen_LIBRARIES}
+#   ${tf2_geometry_msgs_LIBRARIES}
+#   ${tf2_ros_LIBRARIES}
+# )
+# ament_target_dependencies(servo_control_node
+#   rclcpp
+#   moveit_servo
+#   franka_hri_interfaces
+#   std_srvs
+#   tf2
+#   tf2_eigen
+#   tf2_geometry_msgs
+#   tf2_ros
+#   trajectory_msgs
+#   Eigen3
+# )
 
-# Teleop control node
-add_executable(teleop_control_node src/teleop_control_node.cpp)
-target_link_libraries(teleop_control_node
-  ${rclcpp_LIBRARIES}
-  ${sensor_msgs_LIBRARIES}
-  ${franka_hri_interfaces_LIBRARIES}
-  ${std_srvs_LIBRARIES}
-)
-ament_target_dependencies(teleop_control_node
-  rclcpp
-  sensor_msgs
-  franka_hri_interfaces
-  std_srvs
-  franka_msgs
-  rclcpp_action
-)
+# # Teleop control node
+# add_executable(teleop_control_node src/teleop_control_node.cpp)
+# target_link_libraries(teleop_control_node
+#   ${rclcpp_LIBRARIES}
+#   ${sensor_msgs_LIBRARIES}
+#   ${franka_hri_interfaces_LIBRARIES}
+#   ${std_srvs_LIBRARIES}
+# )
+# ament_target_dependencies(teleop_control_node
+#   rclcpp
+#   sensor_msgs
+#   franka_hri_interfaces
+#   std_srvs
+#   franka_msgs
+#   rclcpp_action
+# )
 
-# VLA control node
-add_executable(vla_control_node src/vla_control_node.cpp)
-target_link_libraries(vla_control_node
-  ${rclcpp_LIBRARIES}
-  ${sensor_msgs_LIBRARIES}
-  ${franka_hri_interfaces_LIBRARIES}
-  ${std_srvs_LIBRARIES}
-  ${OpenCV_LIBS}
-)
-ament_target_dependencies(vla_control_node
-  rclcpp
-  sensor_msgs
-  franka_hri_interfaces
-  std_srvs
-  franka_msgs
-  rclcpp_action
-  geometry_msgs
-  OpenCV
-  cv_bridge
-  message_filters
-)
+# # VLA control node
+# add_executable(vla_control_node src/vla_control_node.cpp)
+# target_link_libraries(vla_control_node
+#   ${rclcpp_LIBRARIES}
+#   ${sensor_msgs_LIBRARIES}
+#   ${franka_hri_interfaces_LIBRARIES}
+#   ${std_srvs_LIBRARIES}
+#   ${OpenCV_LIBS}
+# )
+# ament_target_dependencies(vla_control_node
+#   rclcpp
+#   sensor_msgs
+#   franka_hri_interfaces
+#   std_srvs
+#   franka_msgs
+#   rclcpp_action
+#   geometry_msgs
+#   OpenCV
+#   cv_bridge
+#   message_filters
+# )
 
 # Install targets
 install(TARGETS
   manipulate_blocks
-  servo_control_node
-  teleop_control_node
-  vla_control_node
+  # servo_control_node
+  # teleop_control_node
+  # vla_control_node
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}
