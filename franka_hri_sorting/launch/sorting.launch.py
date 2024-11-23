@@ -27,26 +27,26 @@ def generate_launch_description():
     blocks_node = Node(
         package='franka_hri_sorting',
         executable='blocks',
-        name='blocks_node'
+        name='blocks'
     )
 
-    human_input_node = Node(
+    network_node = Node(
         package='franka_hri_sorting',
-        executable='human_input',
-        name='human_input_node'
+        executable='network_node',
+        name='network_node'
     )
 
-    manipulate_blocks_node = Node(
-        package='franka_control',
-        executable='manipulate_blocks',
-        name='manipulate_blocks_node'
-    )
+    # manipulate_blocks_node = Node(
+    #     package='franka_control',
+    #     executable='manipulate_blocks',
+    #     name='manipulate_blocks_node'
+    # )
 
     # Create and return launch description
     return LaunchDescription([
+        # manipulate_blocks_node,
         rviz_launch,
         realsense_launch,
         blocks_node,
-        human_input_node,
-        manipulate_blocks_node
+        network_node,
     ])

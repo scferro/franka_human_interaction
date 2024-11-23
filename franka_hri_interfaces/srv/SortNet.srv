@@ -1,6 +1,7 @@
 # Request
 sensor_msgs/Image image  # Image for training/prediction
 int32 label             # Label for training (ignored for prediction)
+int32 index             # Index for working with indexed blocks
 ---
 # Response
 float32 prediction      # Network prediction

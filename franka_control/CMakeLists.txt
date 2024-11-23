@@ -47,7 +47,6 @@ ament_target_dependencies(manipulate_blocks
   moveit_ros_planning_interface
   moveit_core
   moveit_ros_planning
-  moveit_servo
   franka_msgs
   geometry_msgs
   visualization_msgs

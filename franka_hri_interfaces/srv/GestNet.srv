@@ -1,8 +1,5 @@
 # Request
-float32[] sequence    # Flattened sequence of combined modality data
-int32 sequence_length # Length of the sequence
-int32 channels       # Number of channels in the data
-int32 label          # Label for training (ignored for prediction)
+int32 label     # Label for training (ignored for prediction)
 ---
 # Response
-float32 prediction   # Network prediction (0-1)
+float32 prediction      # Network prediction

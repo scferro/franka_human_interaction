@@ -12,6 +12,7 @@ from franka_hri_sorting.network import SortingNet, GestureNet
 import torchvision.transforms as transforms
 from cv_bridge import CvBridge, CvBridgeError
 from collections import deque
+import random
 
 class NetworkNode(Node):
     def __init__(self):
@@ -28,23 +29,17 @@ class NetworkNode(Node):
         self.gesture_net = GestureNet(sequence_length=self.sequence_length)
         self.bridge = CvBridge()
         
-        # Initialize training buffers for sorting network
-        self.class_0_images = deque(maxlen=self.buffer_size)
-        self.class_1_images = deque(maxlen=self.buffer_size)
-        
-        # Initialize training buffers for gesture network
+        # Initialize training buffers
         self.class_0_gestures = deque(maxlen=self.buffer_size)
         self.class_1_gestures = deque(maxlen=self.buffer_size)
         
-        # Buffer for synchronizing modality data
-        self.mod48_buffer = None  # Store most recent mod48 data
-        self.combined_sequence = []  # Store combined data points
+        # Buffer for sensor data
+        self.mod48_buffer = None
+        self.combined_sequence = []
         
-        # Create services for sorting network
+        # Create services
         self.create_service(SortNet, 'train_sorting', self.train_sorting_callback)
         self.create_service(SortNet, 'get_sorting_prediction', self.get_sorting_prediction_callback)
-
-        # Create services for gesture network
         self.create_service(GestNet, 'train_gesture', self.train_gesture_callback)
         self.create_service(GestNet, 'get_gesture_prediction', self.get_gesture_prediction_callback)
         
@@ -62,93 +57,102 @@ class NetworkNode(Node):
             10
         )
 
-    def preprocess_sequence(self, sequence):
-        """Convert sequence to tensor format for network input."""
-        # Ensure sequence is the right length
-        if len(sequence) > self.sequence_length:
-            sequence = sequence[-self.sequence_length:]
-        elif len(sequence) < self.sequence_length:
-            # Pad with zeros if sequence is too short
-            padding = [np.zeros((5,)) for _ in range(self.sequence_length - len(sequence))]
-            sequence = padding + sequence
+    def process_sensor_data(self, sequence):
+        """Process sensor data into correct format for network."""
+        try:
+            # Ensure sequence has the right length
+            if len(sequence) > self.sequence_length:
+                sequence = sequence[-self.sequence_length:]
+            elif len(sequence) < self.sequence_length:
+                padding = [np.zeros((4,)) for _ in range(self.sequence_length - len(sequence))]
+                sequence = padding + sequence
+                
+            # Stack with correct dimensions: [channels, sequence_length]
+            data = np.stack(sequence, axis=0).T  # Transpose to get channels first
             
-        # Stack sequence into array and convert to tensor
-        data = np.stack(sequence, axis=1)  # Shape: (5, sequence_length)
-        return torch.FloatTensor(data).unsqueeze(0)  # Add batch dimension
-
+            # Convert to tensor and add batch dimension
+            tensor_data = torch.FloatTensor(data).unsqueeze(0)
+            
+            return tensor_data
+                
+        except Exception as e:
+            self.get_logger().error(f'Error processing sensor data: {str(e)}')
+            return None
+        
     def mod48_callback(self, msg):
         """Handle incoming modality 48 data."""
         try:
-            # Extract data using correct dimensions
-            rows = msg.layout.dim[0].size  # 50
-            cols = msg.layout.dim[1].size  # 4
-            data = np.array(msg.data).reshape(rows, cols)
-            self.mod48_buffer = data[:, 1:]  # Remove timestamp column, should be 50x3
-
+            data = np.array(msg.data).reshape(msg.layout.dim[0].size, msg.layout.dim[1].size)
+            self.mod48_buffer = data[:, 1:]  # Remove timestamp, keep 3 feature columns
         except Exception as e:
-            self.get_logger().error(f'Error processing modality 48 data: {str(e)}')
-
+            self.get_logger().error(f'Error in mod48_callback: {str(e)}')
+        
     def mod51_callback(self, msg):
         """Handle incoming modality 51 data and combine with mod48 data."""
         try:
             if self.mod48_buffer is None:
                 return
 
-            # Extract data using correct dimensions and handle variable length
+            # Extract mod51 data and reshape to get rows of [timestamp, value]
             data = np.array(msg.data)
-            if len(data) > 100:  # If we have more than 50 pairs (timestamp, value)
-                # Take only the last 100 entries (50 pairs)
-                data = data[-100:]
-                
-            rows = 50  # We always want 50 rows
-            cols = 2   # timestamp and value
+            if len(data) > 100:  # If we have more than 50 pairs
+                data = data[-100:]  # Take last 100 values (50 pairs)
+            rows = 50
+            cols = 2
             mod51_data = data.reshape(rows, cols)
-            mod51_features = mod51_data[:, 1:]  # Remove timestamp column, should be 50x1
-
-            # Combine features horizontally (keeping time series intact)
-            combined_features = np.hstack((self.mod48_buffer, mod51_features))  # Should be 50x4
+            mod51_features = mod51_data[:, 1:]  # Just keep the values, not timestamps
             
-            self.combined_sequence.append(combined_features)
+            
+            # Combine features horizontally to get 4 columns
+            combined_features = np.hstack((self.mod48_buffer, mod51_features))  # Shape (50, 4)
+            
+            # Take just the first row as our current data point
+            current_point = combined_features[0]  # Shape (4,)
+            
+            # Add to sequence
+            self.combined_sequence.append(current_point)
 
-            # Keep only the most recent sequence_length points
+            # Keep only most recent sequence_length points
             if len(self.combined_sequence) > self.sequence_length:
                 self.combined_sequence = self.combined_sequence[-self.sequence_length:]
 
         except Exception as e:
             self.get_logger().error(f'Error processing modality 51 data: {str(e)}')
 
+    def normalize_sequence(self, tensor_data):
+        """Normalize the full sequence."""
+        try:
+            # Normalize across entire sequence
+            mean = tensor_data.mean()
+            std = tensor_data.std() + 1e-8
+            normalized = (tensor_data - mean) / std
+            return normalized
+        except Exception as e:
+            self.get_logger().error(f'Error normalizing sequence: {str(e)}')
+            return tensor_data
+
     def get_gesture_prediction_callback(self, request, response):
         """Handle prediction requests for the gesture network."""
         try:
-            # Check if we have enough data in the combined sequence
             if len(self.combined_sequence) < self.sequence_length:
-                self.get_logger().warn('Not enough data points for prediction')
                 response.prediction = -1.0
                 return response
 
-            # Take the last sequence_length points
-            recent_sequence = self.combined_sequence[-self.sequence_length:]
+            sequence_tensor = self.process_sensor_data(self.combined_sequence)
+            if sequence_tensor is None:
+                response.prediction = -1.0
+                return response
+
+            # Normalize the full sequence before prediction
+            normalized_sequence = self.normalize_sequence(sequence_tensor)
             
-            # Convert sequence to array and reshape
-            # Should be [batch_size, channels, sequence_length]
-            sequence_data = np.array(recent_sequence)  # Should be [sequence_length, 50, 4]
-            sequence_data = sequence_data.transpose(2, 0, 1)  # Reorder to [4, sequence_length, 50]
-            sequence_data = sequence_data[:, :, 0]  # Take first time point from each sequence, shape: [4, sequence_length]
-            
-            # Add batch dimension
-            sequence_tensor = torch.FloatTensor(sequence_data).unsqueeze(0)  # Shape: [1, 4, sequence_length]
-            
-            # Debug print
-            self.get_logger().info(f'Input tensor shape: {sequence_tensor.shape}')
-            
-            # Get prediction from network
             with torch.no_grad():
-                prediction = self.gesture_net(sequence_tensor)
+                prediction = self.gesture_net(normalized_sequence)
             
-            response.prediction = float(prediction.item())
+            response.prediction = float(prediction.detach().numpy())
             self.get_logger().info(f'Gesture prediction: {response.prediction}')
             return response
-                
+            
         except Exception as e:
             self.get_logger().error(f'Error getting gesture prediction: {str(e)}')
             response.prediction = -1.0
@@ -157,63 +161,95 @@ class NetworkNode(Node):
     def train_gesture_callback(self, request, response):
         """Handle training requests for the gesture network."""
         try:
-            # Reshape the sequence data
-            sequence = np.array(request.sequence).reshape(request.sequence_length, request.channels).T
-            sequence_tensor = torch.FloatTensor(sequence).unsqueeze(0)
-            
+            if len(self.combined_sequence) < self.sequence_length:
+                self.get_logger().warn('Not enough data points for training')
+                response.prediction = -1.0
+                return response
+
+            # Process current sequence
+            sequence_tensor = self.process_sensor_data(self.combined_sequence)
+            if sequence_tensor is None:
+                response.prediction = -1.0
+                return response
+
+            # Normalize before adding to buffer
+            normalized_sequence = self.normalize_sequence(sequence_tensor)
+
             # Add to appropriate buffer
             if request.label == 0:
-                self.class_0_gestures.append(sequence_tensor)
+                self.class_0_gestures.append(normalized_sequence)
             else:
-                self.class_1_gestures.append(sequence_tensor)
+                self.class_1_gestures.append(normalized_sequence)
 
-            # Train on all sequences in both buffers
-            all_sequences = []
-            all_labels = []
+            # Get balanced training data
+            sequences, labels = self._balance_data(self.class_0_gestures, self.class_1_gestures)
 
-            # Add class 0 sequences
-            for seq in self.class_0_gestures:
-                all_sequences.append(seq)
-                all_labels.append(torch.tensor([[0.0]], dtype=torch.float32))
-
-            # Add class 1 sequences
-            for seq in self.class_1_gestures:
-                all_sequences.append(seq)
-                all_labels.append(torch.tensor([[1.0]], dtype=torch.float32))
-
-            # Train if we have sequences
-            if all_sequences:
-                # Randomly shuffle the training data
-                combined = list(zip(all_sequences, all_labels))
-                np.random.shuffle(combined)
-                all_sequences, all_labels = zip(*combined)
-
-                # Train on each sequence
-                for sequence, label in zip(all_sequences, all_labels):
-                    self.gesture_net.optimizer.zero_grad()
-                    output = self.gesture_net(sequence)
-                    loss = self.gesture_net.criterion(output, label)
-                    loss.backward()
-                    self.gesture_net.optimizer.step()
-
-                self.gesture_net.scheduler.step()
-                self.get_logger().info(f'Trained gesture network on {len(all_sequences)} sequences')
+            if sequences:
+                self.gesture_net.train_network(sequences, labels)
+                self.get_logger().info(f'Trained gesture network on {len(sequences)} sequences')
 
             response.prediction = 0.0
             return response
 
         except Exception as e:
-            self.get_logger().error(f'Error training gesture network: {str(e)}')
+            self.get_logger().error(f'Error in train_gesture: {str(e)}')
             response.prediction = -1.0
             return response
+        
+    def _balance_data(self, buffer_0, buffer_1):
+        """
+        Balance two buffers by duplicating samples from the smaller buffer.
+        
+        Args:
+            buffer_0: Deque of class 0 samples
+            buffer_1: Deque of class 1 samples
+            
+        Returns:
+            tuple: (balanced_samples, balanced_labels)
+        """
+        # Convert deques to lists for easier manipulation
+        samples_0 = list(buffer_0)
+        samples_1 = list(buffer_1)
+        
+        # Get lengths
+        len_0 = len(samples_0)
+        len_1 = len(samples_1)
+        
+        if len_0 == 0 or len_1 == 0:
+            self.get_logger().warn("One or both classes have no samples")
+            return [], []
+            
+        # Calculate how many samples we need to duplicate
+        target_size = max(len_0, len_1)
+        
+        # Duplicate samples from the smaller buffer
+        if len_0 < target_size:
+            additional_samples = random.choices(samples_0, k=target_size - len_0)
+            samples_0.extend(additional_samples)
+        elif len_1 < target_size:
+            additional_samples = random.choices(samples_1, k=target_size - len_1)
+            samples_1.extend(additional_samples)
+            
+        # Create balanced labels
+        labels_0 = [torch.tensor([[0]], dtype=torch.float32) for _ in range(target_size)]
+        labels_1 = [torch.tensor([[1]], dtype=torch.float32) for _ in range(target_size)]
+        
+        # Combine and shuffle
+        all_samples = samples_0 + samples_1
+        all_labels = labels_0 + labels_1
+        
+        # Shuffle both lists with the same random order
+        combined = list(zip(all_samples, all_labels))
+        random.shuffle(combined)
+        all_samples, all_labels = zip(*combined)
+        
+        return list(all_samples), list(all_labels)
 
     def train_sorting_callback(self, request, response):
         """Handle training requests for the sorting network."""
         try:
-            # Convert ROS Image to CV2 image
+            # Convert ROS Image to CV2 image and preprocess
             cv_image = self.bridge.imgmsg_to_cv2(request.image, desired_encoding='rgb8')
-            
-            # Convert to tensor
             image_tensor = self._preprocess_image(cv_image)
 
             # Add to appropriate buffer
@@ -222,28 +258,25 @@ class NetworkNode(Node):
             else:
                 self.class_1_images.append(image_tensor)
 
-            self.get_logger().info(f"Buffer sizes - Class 0: {len(self.class_0_images)}, Class 1: {len(self.class_1_images)}")
+            # Get buffer sizes for logging
+            size_0 = len(self.class_0_images)
+            size_1 = len(self.class_1_images)
+            self.get_logger().info(
+                f"Current buffer sizes - Class 0: {size_0}, Class 1: {size_1}"
+            )
             
-            # Train on all images in both buffers
-            all_images = []
-            all_labels = []
-
-            # Add class 0 images
-            for img in self.class_0_images:
-                all_images.append(img)
-                all_labels.append(torch.tensor([[0]], dtype=torch.float32))
-
-            # Add class 1 images
-            for img in self.class_1_images:
-                all_images.append(img)
-                all_labels.append(torch.tensor([[1]], dtype=torch.float32))
-
+            # Get balanced training data
+            images, labels = self._balance_data(self.class_0_images, self.class_1_images)
+            
             # Train if we have images
-            if all_images:
-                self.sorting_net.train_network(all_images, all_labels)
-                self.get_logger().info(f"Trained network on {len(all_images)} images")
+            if images:
+                self.sorting_net.train_network(images, labels)
+                self.get_logger().info(
+                    f"Trained network on {len(images)} images "
+                    f"({len(images)//2} per class)"
+                )
             
-            response.prediction = 0.0  # Training doesn't need a prediction
+            response.prediction = 0.0
             return response
             
         except Exception as e:
