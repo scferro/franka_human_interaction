@@ -25,6 +25,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SortNet.srv"
   "srv/GestNet.srv"
   "srv/VLAService.srv"
+  "srv/SaveModel.srv"
   "msg/EECommand.msg"
 DEPENDENCIES geometry_msgs franka_msgs visualization_msgs
 )

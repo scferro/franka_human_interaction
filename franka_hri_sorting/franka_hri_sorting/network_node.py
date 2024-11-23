@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import rclpy
 from rclpy.node import Node
 from std_srvs.srv import Empty
@@ -21,12 +19,20 @@ class NetworkNode(Node):
         # Initialize parameters
         self.declare_parameter('buffer_size', 25)
         self.declare_parameter('sequence_length', 20)
+        self.declare_parameter('sorting_model_path', '')
+        self.declare_parameter('gesture_model_path', '')
+        self.declare_parameter('save_directory', '/home/user/saved_models')
         self.buffer_size = self.get_parameter('buffer_size').value
         self.sequence_length = self.get_parameter('sequence_length').value
+        sorting_model = self.get_parameter('sorting_model_path').value
+        gesture_model = self.get_parameter('gesture_model_path').value
+        self.save_dir = self.get_parameter('save_directory').value
         
         # Initialize networks
-        self.sorting_net = SortingNet()
-        self.gesture_net = GestureNet(sequence_length=self.sequence_length)
+        self.sorting_net = SortingNet(model_path=sorting_model)
+        self.gesture_net = GestureNet(sequence_length=self.sequence_length, 
+                                    model_path=gesture_model)
+        
         self.bridge = CvBridge()
         
         # Initialize training buffers
@@ -42,6 +48,18 @@ class NetworkNode(Node):
         self.create_service(SortNet, 'get_sorting_prediction', self.get_sorting_prediction_callback)
         self.create_service(GestNet, 'train_gesture', self.train_gesture_callback)
         self.create_service(GestNet, 'get_gesture_prediction', self.get_gesture_prediction_callback)
+        # Add save network services
+        self.save_sorting_service = self.create_service(
+            SaveModel, 
+            'save_sorting_network',
+            self.save_sorting_callback
+        )
+        
+        self.save_gesture_service = self.create_service(
+            SaveModel, 
+            'save_gesture_network',
+            self.save_gesture_callback
+        )
         
         # Create subscribers for modality data
         self.mod48_sub = self.create_subscription(
@@ -315,6 +333,60 @@ class NetworkNode(Node):
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
         return transform(cv_image).unsqueeze(0)
+    
+    def save_sorting_callback(self, request, response):
+        """Save sorting network to file."""
+        try:
+            # Generate filename with timestamp
+            timestamp = self.get_clock().now().to_msg().sec
+            
+            # Use custom filename if provided, otherwise use timestamp
+            if request.filename:
+                filepath = f"{self.save_dir}/{request.filename}"
+            else:
+                filepath = f"{self.save_dir}/sorting_net_{timestamp}.pt"
+            
+            # Save network
+            self.sorting_net.save_model(filepath)
+            
+            response.filepath = filepath
+            response.success = True
+            
+            self.get_logger().info(f"Saved sorting network to {filepath}")
+            
+        except Exception as e:
+            self.get_logger().error(f"Error saving sorting network: {str(e)}")
+            response.success = False
+            response.filepath = ""
+            
+        return response
+
+    def save_gesture_callback(self, request, response):
+        """Save gesture network to file."""
+        try:
+            # Generate filename with timestamp
+            timestamp = self.get_clock().now().to_msg().sec
+            
+            # Use custom filename if provided, otherwise use timestamp
+            if request.filename:
+                filepath = f"{self.save_dir}/{request.filename}"
+            else:
+                filepath = f"{self.save_dir}/gesture_net_{timestamp}.pt"
+            
+            # Save network
+            self.gesture_net.save_model(filepath)
+            
+            response.filepath = filepath
+            response.success = True
+            
+            self.get_logger().info(f"Saved gesture network to {filepath}")
+            
+        except Exception as e:
+            self.get_logger().error(f"Error saving gesture network: {str(e)}")
+            response.success = False
+            response.filepath = ""
+            
+        return response
 
 def main(args=None):
     rclpy.init(args=args)

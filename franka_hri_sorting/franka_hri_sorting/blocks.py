@@ -19,12 +19,11 @@ from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
 from tf2_ros import TransformBroadcaster, Buffer, TransformListener
 from tf2_geometry_msgs.tf2_geometry_msgs import do_transform_point
 
-from franka_hri.network import SortingNet
 import torchvision.transforms as transforms
-import torch
 from datetime import datetime
 import random
 from sklearn.linear_model import RANSACRegressor
+import rclpy.time
 
 class Blocks(Node):
     def __init__(self):
@@ -67,9 +66,12 @@ class Blocks(Node):
         self.reset_blocks_srv = self.create_service(Empty, 'reset_blocks', self.reset_blocks_callback)
 
         # Create the nn object and prediction and training services
-        self.network = SortingNet()
         self.train_network_srv = self.create_service(SortNet, 'train_network', self.train_network_callback)
         self.get_network_prediction_srv = self.create_service(SortNet, 'get_network_prediction', self.get_network_prediction_callback)
+
+        # Add in __init__
+        self.train_sorting_client = self.create_client(SortNet, 'train_sorting')
+        self.get_sorting_prediction_client = self.create_client(SortNet, 'get_sorting_prediction')
 
         # Create TF broadcaster and buffer
         self.tf_broadcaster = TransformBroadcaster(self)
@@ -88,9 +90,6 @@ class Blocks(Node):
         self.marker_timer_period = 0.1  # seconds
         self.marker_timer = self.create_timer(self.marker_timer_period, self.marker_timer_callback)
 
-        # Load yolo model
-        self.yolo = ultralytics.YOLO("yolov8x.pt")
-
         # Other setup
         self.bridge = CvBridge()
         self.block_markers = MarkerArray()
@@ -100,56 +99,50 @@ class Blocks(Node):
         self.fy = None
         self.cx = None
         self.cy = None
-        self.image_tensors = []
-        self.label_tensors = []
 
     def pretrain_network_callback(self, request, response):
         self.block_markers = MarkerArray()
         self.block_images = []
-        self.image_tensors = []
-        self.label_tensors = []
 
+        # Scan for blocks
         marker_array, img_with_boxes = self.scan_overhead(self.block_markers, [], True)
-
         img_with_boxes_msg = self.cv2_to_ros2_image(img_with_boxes)
         self.img_msg_out = img_with_boxes_msg
-
         markers = marker_array.markers
 
+        # Train network with each block's images
         for i in range(len(markers)):
             marker = markers[i]
-            # Get images of block
             images = self.block_images[i]
             
-            filepath = "/home/scferro/Documents/final_project/training_images/"
-
+            # Get label based on y position
             label = 0
             if marker.pose.position.y < 0:
                 label = 1
 
-            # Train the network using the images
+            # Train network using each image
             for img in images:
-                # Generate the current time as a string
-                current_time = datetime.now().strftime("%Y%m%d_%H%M%S%f")
-                # Construct the filename with the current time
-                filename = f'image_{current_time}.png'  
-                cv2.imwrite(filepath+filename, img)
-                transformed_images = self.transform_image(img)
-                for img_tf in transformed_images:
-                    img_tensor = self.preprocess_image(img_tf)
-                    label_tensor = torch.tensor([[label]], dtype=torch.float32)
-                    self.image_tensors.append(img_tensor)
-                    self.label_tensors.append(label_tensor)
-        
-        iterations = 10
-        for i in range(iterations):
-            self.network.train_network(self.image_tensors, self.label_tensors)
+                try:
+                    # Convert image to ROS msg
+                    rgb_image = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    ros_msg = self.bridge.cv2_to_imgmsg(rgb_image, encoding='rgb8')
+                    
+                    # Create training request
+                    req = SortNet.Request()
+                    req.image = ros_msg
+                    req.label = label
+                    
+                    # Call training service
+                    future = self.train_sorting_client.call_async(req)
+                    rclpy.spin_until_future_complete(self, future)
+                    
+                except Exception as e:
+                    self.get_logger().error(f"Error training network: {str(e)}")
 
         self.get_logger().info("Pre-trained network.")
         self.block_images = []
         self.block_markers = MarkerArray()
         return response
-
 
     def reset_blocks_callback(self, request, response):
         self.block_markers = MarkerArray()
@@ -163,54 +156,63 @@ class Blocks(Node):
         # Get block index and label from message
         block_index = request.index
         label = request.label
-
-        # Get images of block
         images = self.block_images[block_index]
-        
-        filepath = "/home/scferro/Documents/final_project/training_images/"
 
-        # Train the network using the images
+        # Train network using each image 
         for img in images:
-            # Generate the current time as a string
-            current_time = datetime.now().strftime("%Y%m%d_%H%M%S%f")
-            # Construct the filename with the current time
-            filename = f'image_{current_time}.png'  
-            cv2.imwrite(filepath+filename, img)
-            transformed_images = self.transform_image(img)
-            for img_tf in transformed_images:
-                img_tensor = self.preprocess_image(img_tf)
-                label_tensor = torch.tensor([[label]], dtype=torch.float32)
-                self.image_tensors.append(img_tensor)
-                self.label_tensors.append(label_tensor)
+            try:
+                # Convert image to ROS msg
+                rgb_image = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                ros_msg = self.bridge.cv2_to_imgmsg(rgb_image, encoding='rgb8')
+                
+                # Create training request
+                req = SortNet.Request()
+                req.image = ros_msg
+                req.label = label
+                
+                # Call training service
+                future = self.train_sorting_client.call_async(req)
+                rclpy.spin_until_future_complete(self, future)
+                
+            except Exception as e:
+                self.get_logger().error(f"Error training network: {str(e)}")
 
-        # Limit length of lists to max_images items
-        max_images = 50
-        if len(self.image_tensors) > max_images:
-            self.image_tensors = self.image_tensors[-100:-1]
-            self.label_tensors = self.label_tensors[-100:-1]
-
-        self.network.train_network(self.image_tensors, self.label_tensors)
         self.get_logger().info("Trained network.")
-
         return response
 
     def get_network_prediction_callback(self, request, response):
-        # Get block index from message
         block_index = request.index
-
-        # Get images of block
         images = self.block_images[block_index]
+        predictions = []
 
-        # Get prediction for each image of the block
-        pred_list = []
+        # Get prediction for each image
         for img in images:
-            img_tensor = self.preprocess_image(img)
-            pred = self.network.forward(img_tensor)
-            pred_list.append(pred.detach().numpy()) 
-
-        # Return average prediction for the images
-        response.prediction = float(np.mean(pred_list)) 
-        self.get_logger().info(f"Prediction: {float(np.mean(pred_list)) }")
+            try:
+                # Convert image to ROS msg
+                rgb_image = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) 
+                ros_msg = self.bridge.cv2_to_imgmsg(rgb_image, encoding='rgb8')
+                
+                # Create prediction request
+                req = SortNet.Request()
+                req.image = ros_msg
+                
+                # Call prediction service
+                future = self.get_sorting_prediction_client.call_async(req)
+                rclpy.spin_until_future_complete(self, future)
+                
+                if future.result() is not None:
+                    predictions.append(future.result().prediction)
+                    
+            except Exception as e:
+                self.get_logger().error(f"Error getting prediction: {str(e)}")
+                
+        # Return average prediction
+        if predictions:
+            response.prediction = float(np.mean(predictions))
+            self.get_logger().info(f"Prediction: {response.prediction}")
+        else:
+            response.prediction = -1.0
+            
         return response
 
     def preprocess_image(self, image):
@@ -661,7 +663,7 @@ class Blocks(Node):
 
         t_world.transform.translation.x = 0.0
         t_world.transform.translation.y = 0.0
-        t_world.transform.translation.z = 0.0
+        t_world.transform.translation.z = 0.02
 
         t_world.transform.rotation.x = 0.0
         t_world.transform.rotation.y = 0.0

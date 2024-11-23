@@ -76,7 +76,7 @@ public:
 
     pile_0_start.position.x = 0.6;
     pile_0_start.position.y = 0.35;
-    pile_0_start.position.z = 0.02;
+    pile_0_start.position.z = 0.0;
     pile_0_start.orientation.x = 1.0;
     pile_0_start.orientation.y = 0.0;
     pile_0_start.orientation.z = 0.0;
@@ -147,6 +147,10 @@ private:
   void pretrain_franka_callback(const std::shared_ptr<std_srvs::srv::Empty::Request> request,
                         std::shared_ptr<std_srvs::srv::Empty::Response> response)
   {
+    // Start in ready position 
+    std::vector<double> joint_positions = {0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785};
+    move_to_joints(joint_positions);
+
     auto overhead_scan_pose = geometry_msgs::msg::PoseStamped();
     overhead_scan_pose.header.stamp = this->get_clock()->now();
     overhead_scan_pose.header.frame_id = "world";
@@ -174,6 +178,10 @@ private:
 
   void sort_blocks(const std::shared_ptr<rclcpp_action::ServerGoalHandle<franka_hri_interfaces::action::EmptyAction>> goal_handle)
   {
+    // Start in ready position 
+    std::vector<double> joint_positions = {0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785};
+    move_to_joints(joint_positions);
+
     auto overhead_scan_pose = geometry_msgs::msg::PoseStamped();
     overhead_scan_pose.header.stamp = this->get_clock()->now();
     overhead_scan_pose.header.frame_id = "world";
@@ -269,6 +277,10 @@ private:
         place_in_stack(i, stack_id);
         train_network(i, stack_id);
         sorted_index.push_back(i);
+
+        // Move back to ready position 
+        std::vector<double> joint_positions = {0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785};
+        move_to_joints(joint_positions);  
       }
     }
     move_to_pose(overhead_scan_pose, planning_time, vel_factor, accel_factor);
@@ -584,6 +596,26 @@ private:
      RCLCPP_ERROR(this->get_logger(), "Planning failed");
    }
  }
+
+void move_to_joints(const std::vector<double>& joint_positions)
+{
+    RCLCPP_INFO(this->get_logger(), "Planning joint movement");
+
+    // Set the joint value target
+    move_group->setJointValueTarget(joint_positions);
+
+    // Plan and execute
+    moveit::planning_interface::MoveGroupInterface::Plan plan;
+    bool success = (move_group->plan(plan) == moveit::planning_interface::MoveItErrorCode::SUCCESS);
+
+    if (success) {
+        RCLCPP_INFO(this->get_logger(), "Executing joint movement");
+        move_group->execute(plan);
+        RCLCPP_INFO(this->get_logger(), "Joint movement complete");
+    } else {
+        RCLCPP_ERROR(this->get_logger(), "Joint movement planning failed");
+    }
+}
 
  void create_collision_box(
    const geometry_msgs::msg::Pose target_pose, const geometry_msgs::msg::Vector3 size,
