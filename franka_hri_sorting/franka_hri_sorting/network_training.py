@@ -27,7 +27,7 @@ class NetworkTrainingNode(Node):
 
     def _init_parameters(self):
         """Initialize node parameters."""
-        self.declare_parameter('training_mode', 'gestures_only')
+        self.declare_parameter('training_mode', 'sorting_only')
         self.declare_parameter('training_images_path', '/home/scferro/Documents/final_project/training_images')
         self.declare_parameter('display_time', 2.0)
         self.declare_parameter('gesture_warning_time', 3.0)

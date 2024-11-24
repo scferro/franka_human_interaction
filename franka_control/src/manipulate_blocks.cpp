@@ -2,6 +2,7 @@
 #include <memory>
 #include <random>
 #include <thread>
+#include <future>
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/vector3.hpp>
@@ -326,15 +327,25 @@ private:
           RCLCPP_INFO(this->get_logger(), "Waiting for prediction service");
       }
 
-      auto result_future = get_network_prediction_client->async_send_request(request);
-      if (rclcpp::spin_until_future_complete(this->shared_from_this(), result_future, std::chrono::seconds(1)) != 
-          rclcpp::FutureReturnCode::SUCCESS)
-      {
-          RCLCPP_ERROR(this->get_logger(), "Failed to get prediction");
+      // Use a promise/future pair to handle the async response
+      auto response_received = std::make_shared<std::promise<franka_hri_interfaces::srv::SortNet::Response::SharedPtr>>();
+      auto future_result = response_received->get_future();
+
+      auto callback = [response_received](rclcpp::Client<franka_hri_interfaces::srv::SortNet>::SharedFuture future) {
+          response_received->set_value(future.get());
+      };
+
+      // Send the request with a callback
+      get_network_prediction_client->async_send_request(request, callback);
+
+      // Wait for the response with a timeout
+      if (future_result.wait_for(std::chrono::seconds(1)) == std::future_status::timeout) {
+          RCLCPP_ERROR(this->get_logger(), "Failed to get prediction - timeout");
           return -1;
       }
 
-      auto result = result_future.get();
+      auto result = future_result.get();
+      RCLCPP_INFO(this->get_logger(), "Prediction: %f", result->prediction);
       return result->prediction;
   }
 
@@ -537,15 +548,17 @@ private:
    double planning_time = 20.;
    double vel_factor = 0.4;
    double accel_factor = 0.1;
-
+  
+   RCLCPP_INFO(this->get_logger(), "Grab pose 1");
    move_to_pose(grab_pose_1, planning_time, vel_factor, accel_factor);
 
    auto grab_pose_2 = grab_pose_1;
    grab_pose_2.header.stamp = this->get_clock()->now();
-   grab_pose_2.pose.position.z = marker.pose.position.z + 0.03;
+   grab_pose_2.pose.position.z = marker.pose.position.z + 0.04;
    if (grab_pose_2.pose.position.z < 0.05) {
      grab_pose_2.pose.position.z = 0.06;
    }
+   RCLCPP_INFO(this->get_logger(), "Grab pose 2");
    move_to_pose(grab_pose_2, planning_time, vel_factor, accel_factor);
 
    int count = 0;
@@ -553,23 +566,28 @@ private:
      RCLCPP_INFO(this->get_logger(), "Waiting for update_markers service");
      count++;
    }
+   RCLCPP_INFO(this->get_logger(), "updating markers!");
 
    auto request = std::make_shared<franka_hri_interfaces::srv::UpdateMarkers::Request>();
    marker.action = 2;
    request->input_markers.markers.push_back(marker);
    std::vector<int> update = {i};
    request->markers_to_update = update;
+   RCLCPP_INFO(this->get_logger(), "sending update request");
 
    auto future = update_markers_cli->async_send_request(request);
    auto result = future.get();
    block_markers = result->output_markers;
+   RCLCPP_INFO(this->get_logger(), "update complete");
 
    double width = 0.02;
    double speed = 0.2;
    double force = 0.001;
+   RCLCPP_INFO(this->get_logger(), "Grasping!");
    send_grasp_goal(width, speed, force);
 
    auto retreat_pose = grab_pose_1;
+   RCLCPP_INFO(this->get_logger(), "Retreating");
    retreat_pose.header.stamp = this->get_clock()->now();
    retreat_pose.pose.position.z = 0.2;
    retreat_pose.pose.orientation = marker.pose.orientation;
@@ -601,8 +619,13 @@ void move_to_joints(const std::vector<double>& joint_positions)
 {
     RCLCPP_INFO(this->get_logger(), "Planning joint movement");
 
+    double vel_factor = 0.3;
+    double accel_factor = 0.1;
+
     // Set the joint value target
     move_group->setJointValueTarget(joint_positions);
+    move_group->setMaxVelocityScalingFactor(vel_factor);
+    move_group->setMaxAccelerationScalingFactor(accel_factor);
 
     // Plan and execute
     moveit::planning_interface::MoveGroupInterface::Plan plan;

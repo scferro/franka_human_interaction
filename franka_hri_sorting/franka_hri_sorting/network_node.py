@@ -1,7 +1,7 @@
 import rclpy
 from rclpy.node import Node
 from std_srvs.srv import Empty
-from franka_hri_interfaces.srv import SortNet, GestNet
+from franka_hri_interfaces.srv import SortNet, GestNet, SaveModel
 from sensor_msgs.msg import Image
 from std_msgs.msg import Float32MultiArray
 import torch
@@ -35,7 +35,9 @@ class NetworkNode(Node):
         
         self.bridge = CvBridge()
         
-        # Initialize training buffers
+        # Initialize all training buffers
+        self.class_0_images = deque(maxlen=self.buffer_size)
+        self.class_1_images = deque(maxlen=self.buffer_size)
         self.class_0_gestures = deque(maxlen=self.buffer_size)
         self.class_1_gestures = deque(maxlen=self.buffer_size)
         

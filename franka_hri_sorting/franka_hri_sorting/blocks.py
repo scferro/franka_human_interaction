@@ -100,6 +100,8 @@ class Blocks(Node):
         self.cx = None
         self.cy = None
 
+        self.get_logger().info("Blocks node started successfully!")
+
     def pretrain_network_callback(self, request, response):
         self.block_markers = MarkerArray()
         self.block_images = []
@@ -185,24 +187,36 @@ class Blocks(Node):
         images = self.block_images[block_index]
         predictions = []
 
+        self.get_logger().info("Received prediction request.")
+
         # Get prediction for each image
         for img in images:
             try:
-                # Convert image to ROS msg
+                self.get_logger().info("converting image.")
                 rgb_image = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) 
                 ros_msg = self.bridge.cv2_to_imgmsg(rgb_image, encoding='rgb8')
-                
-                # Create prediction request
+
+                self.get_logger().info("sending request.")
                 req = SortNet.Request()
                 req.image = ros_msg
                 
-                # Call prediction service
+                # Send request and wait with timeout
                 future = self.get_sorting_prediction_client.call_async(req)
-                rclpy.spin_until_future_complete(self, future)
                 
-                if future.result() is not None:
-                    predictions.append(future.result().prediction)
-                    
+                # Create timeout
+                timeout = 5.0  # 5 seconds
+                start_time = self.get_clock().now()
+                
+                # Wait for result with timeout
+                while (self.get_clock().now() - start_time).nanoseconds * 1e-9 < timeout:
+                    if future.done():
+                        result = future.result()
+                        if result is not None:
+                            predictions.append(result.prediction)
+                            self.get_logger().info("Got prediction for 1 image.")
+                        break
+                    rclpy.spin_once(self, timeout_sec=0.1)
+                        
             except Exception as e:
                 self.get_logger().error(f"Error getting prediction: {str(e)}")
                 
@@ -213,6 +227,7 @@ class Blocks(Node):
         else:
             response.prediction = -1.0
             
+        self.get_logger().info("Got prediction.")
         return response
 
     def preprocess_image(self, image):
@@ -234,8 +249,11 @@ class Blocks(Node):
 
     def update_markers_callback(self, request, response):
         # Extract markers and indices from request
+        self.get_logger().info("Received update_markers request")
         new_markers = request.input_markers.markers
         marker_index_list = request.markers_to_update
+
+        self.get_logger().info(f"Updating {len(marker_index_list)} markers")
 
         # update markers
         for i in range(len(marker_index_list)):
@@ -246,6 +264,7 @@ class Blocks(Node):
 
         # Return updated markers
         response.output_markers = self.block_markers
+        self.get_logger().info("Sending response")
 
         return response
 

@@ -2,8 +2,8 @@ from launch import LaunchDescription
 from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
-from launch.actions import OpaqueFunction
+from launch.substitutions import LaunchConfiguration, PythonExpression
+from launch.conditions import IfCondition
 from ament_index_python.packages import get_package_share_directory
 import os
 
@@ -20,7 +20,21 @@ def generate_launch_description():
     os.makedirs(default_models_dir, exist_ok=True)
     os.makedirs(default_save_dir, exist_ok=True)
 
-    # Declare launch arguments with defaults
+    # Mode selection argument
+    mode_arg = DeclareLaunchArgument(
+        'mode',
+        default_value='robot',
+        description='Launch mode: "robot" or "images"'
+    )
+
+    # Training mode argument
+    training_mode_arg = DeclareLaunchArgument(
+        'training_mode',
+        default_value='sorting_only',
+        description='Training mode: "sorting_only", "gestures_only", or "both"'
+    )
+
+    # Standard arguments
     sorting_model_path_arg = DeclareLaunchArgument(
         'sorting_model_path',
         default_value='',
@@ -51,24 +65,41 @@ def generate_launch_description():
         description='Length of gesture sequences'
     )
 
-    # Define launch actions
+    # Training images directory argument
+    training_images_arg = DeclareLaunchArgument(
+        'training_images_path',
+        default_value="/home/scferro/Documents/final_project/training_images",
+        description='Path to training images directory'
+    )
+
+    # Define robot-mode nodes
     rviz_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(franka_moveit_config_dir, 'launch', 'rviz.launch.py')
         ),
-        launch_arguments={'robot_ip': 'panda0.robot'}.items()
+        launch_arguments={'robot_ip': 'panda0.robot'}.items(),
+        condition=IfCondition(PythonExpression(["'", LaunchConfiguration('mode'), "' == 'robot'"]))
     )
 
     realsense_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(franka_hri_sorting_dir, 'launch', 'realsense.launch.py')
-        )
+        ),
+        condition=IfCondition(PythonExpression(["'", LaunchConfiguration('mode'), "' == 'robot'"]))
     )
 
     blocks_node = Node(
         package='franka_hri_sorting',
         executable='blocks',
-        name='blocks'
+        name='blocks',
+        condition=IfCondition(PythonExpression(["'", LaunchConfiguration('mode'), "' == 'robot'"]))
+    )
+
+    # Define shared nodes
+    human_input_node = Node(
+        package='franka_hri_sorting',
+        executable='human_input',
+        name='human_input'
     )
 
     network_node = Node(
@@ -85,17 +116,37 @@ def generate_launch_description():
         output='screen'
     )
 
+    # Define image-mode node
+    network_training_node = Node(
+        package='franka_hri_sorting',
+        executable='network_training',
+        name='network_training',
+        parameters=[{
+            'training_images_path': LaunchConfiguration('training_images_path'),
+            'training_mode': LaunchConfiguration('training_mode'),
+            'display_time': 2.0,
+            'gesture_warning_time': 3.0,
+            'prediction_timeout': 5.0
+        }],
+        condition=IfCondition(PythonExpression(["'", LaunchConfiguration('mode'), "' == 'images'"]))
+    )
+
     # Create and return launch description
     return LaunchDescription([
         # Launch arguments
+        mode_arg,
+        training_mode_arg,
         sorting_model_path_arg,
         gesture_model_path_arg,
         save_directory_arg,
         buffer_size_arg,
         sequence_length_arg,
+        training_images_arg,
         # Nodes and includes
         rviz_launch,
         realsense_launch,
         blocks_node,
         network_node,
+        human_input_node,
+        network_training_node,
     ])
