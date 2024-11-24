@@ -1,0 +1,6 @@
+# Request
+string filename  # Optional custom filename, empty for timestamp-based name
+---
+# Response
+string filepath  # Full path where model was saved
+bool success
