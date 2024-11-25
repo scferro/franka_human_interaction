@@ -13,7 +13,7 @@ def generate_launch_description():
     franka_moveit_config_dir = get_package_share_directory('franka_moveit_config')
 
     # Define paths for model saving/loading
-    default_models_dir = os.path.join(franka_hri_sorting_dir, 'models')
+    default_models_dir = os.path.join('/home/scferro/Documents/final_project/hri_models')
     default_save_dir = default_models_dir
     rviz_config_file = os.path.join(franka_hri_sorting_dir, 'config', 'sorting.rviz')
     

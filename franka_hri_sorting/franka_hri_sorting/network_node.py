@@ -44,6 +44,7 @@ class NetworkNode(Node):
         # Buffer for sensor data
         self.mod48_buffer = None
         self.combined_sequence = []
+        self.last_inference_sequence = []
         
         # Create services
         self.create_service(SortNet, 'train_sorting', self.train_sorting_callback)
@@ -171,6 +172,7 @@ class NetworkNode(Node):
             
             response.prediction = float(prediction.detach().numpy())
             self.get_logger().info(f'Gesture prediction: {response.prediction}')
+            self.last_inference_sequence = self.combined_sequence
             return response
             
         except Exception as e:
@@ -181,13 +183,13 @@ class NetworkNode(Node):
     def train_gesture_callback(self, request, response):
         """Handle training requests for the gesture network."""
         try:
-            if len(self.combined_sequence) < self.sequence_length:
+            if len(self.last_inference_sequence) < self.sequence_length:
                 self.get_logger().warn('Not enough data points for training')
                 response.prediction = -1.0
                 return response
 
             # Process current sequence
-            sequence_tensor = self.process_sensor_data(self.combined_sequence)
+            sequence_tensor = self.process_sensor_data(self.last_inference_sequence)
             if sequence_tensor is None:
                 response.prediction = -1.0
                 return response

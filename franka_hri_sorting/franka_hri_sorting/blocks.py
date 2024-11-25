@@ -32,8 +32,8 @@ class Blocks(Node):
         # Create callback groups for concurrent service handling
         self.marker_callback_group = rclpy.callback_groups.ReentrantCallbackGroup()
         self.prediction_callback_group = rclpy.callback_groups.ReentrantCallbackGroup()
+        self.network_callback_group = rclpy.callback_groups.ReentrantCallbackGroup()
         
-
         # Subscriber to the d405 Image topic
         self.img_sub = self.create_subscription(
             Image,
@@ -90,8 +90,17 @@ class Blocks(Node):
         )
 
         # Add in __init__
-        self.train_sorting_client = self.create_client(SortNet, 'train_sorting')
-        self.get_sorting_prediction_client = self.create_client(SortNet, 'get_sorting_prediction')
+        self.train_sorting_client = self.create_client(
+            SortNet, 
+            'train_sorting',
+            callback_group=self.network_callback_group
+        )
+        # Create clients with callback groups
+        self.get_sorting_prediction_client = self.create_client(
+            SortNet, 
+            'get_sorting_prediction',
+            callback_group=self.network_callback_group
+        )
 
         # Create TF broadcaster and buffer
         self.tf_broadcaster = TransformBroadcaster(self)
@@ -114,11 +123,12 @@ class Blocks(Node):
         self.bridge = CvBridge()
         self.block_markers = MarkerArray()
         self.block_images = []
-        self.make_static_transforms()
         self.fx = None
         self.fy = None
         self.cx = None
         self.cy = None
+        self.table_z_offset = 0.02
+        self.make_static_transforms()
 
         self.get_logger().info("Blocks node started successfully!")
 
@@ -139,7 +149,7 @@ class Blocks(Node):
             
             # Get label based on y position
             label = 0
-            if marker.pose.position.y < 0:
+            if marker.pose.position.y > 0:
                 label = 1
 
             # Train network using each image
@@ -216,7 +226,6 @@ class Blocks(Node):
         self.get_logger().info("Training complete")
         return response
 
-
     async def get_network_prediction_callback(self, request, response):
         block_index = request.index
         images = self.block_images[block_index]
@@ -235,29 +244,31 @@ class Blocks(Node):
                 req = SortNet.Request()
                 req.image = ros_msg
                 
-                # Send request and wait with timeout
+                # Send request
                 future = self.get_sorting_prediction_client.call_async(req)
                 
                 try:
-                    # Wait for result with timeout
-                    result = await rclpy.task.Future.wait_for(future, timeout=5.0)
+                    # Wait for result using await - non-blocking
+                    result = await future
+                    
                     if result is not None:
-                        predictions.append(result.prediction)
-                        self.get_logger().info("Got prediction for 1 image.")
-                except TimeoutError:
-                    self.get_logger().warn("Prediction request timed out")
-                    continue
+                        pred = result.prediction
+                        predictions.append(pred)
+                        self.get_logger().info(f"Got prediction: {pred}")
+                    else:
+                        self.get_logger().warn("Received null response from prediction service")
+                        
                 except Exception as e:
-                    self.get_logger().error(f"Error waiting for prediction: {str(e)}")
+                    self.get_logger().error(f"Error waiting for prediction result: {str(e)}")
                     continue
                     
             except Exception as e:
-                self.get_logger().error(f"Error getting prediction: {str(e)}")
+                self.get_logger().error(f"Error in prediction request: {str(e)}")
                 
         # Return average prediction
         if predictions:
             response.prediction = float(np.mean(predictions))
-            self.get_logger().info(f"Final prediction: {response.prediction}")
+            self.get_logger().info(f"Final prediction (average of {len(predictions)} predictions): {response.prediction}")
         else:
             response.prediction = -1.0
             self.get_logger().warn("No predictions received")
@@ -364,7 +375,7 @@ class Blocks(Node):
         hsv_image = cv2.cvtColor(img_copy, cv2.COLOR_BGR2HSV)
 
         # Define the color range for the objects you want to segment (adjust as needed)
-        lower_color = np.array([0, 100, 80])  
+        lower_color = np.array([0, 50, 50])  
         upper_color = np.array([180, 255, 255]) 
 
         # Create a binary mask based on the color range
@@ -699,7 +710,7 @@ class Blocks(Node):
 
         t_cam.transform.translation.x = 0.07
         t_cam.transform.translation.y = 0.0
-        t_cam.transform.translation.z = 0.05
+        t_cam.transform.translation.z = 0.055
 
         t_cam.transform.rotation.x = 0.0
         t_cam.transform.rotation.y = 0.0
@@ -716,7 +727,7 @@ class Blocks(Node):
 
         t_world.transform.translation.x = 0.0
         t_world.transform.translation.y = 0.0
-        t_world.transform.translation.z = 0.02
+        t_world.transform.translation.z = -self.table_z_offset
 
         t_world.transform.rotation.x = 0.0
         t_world.transform.rotation.y = 0.0

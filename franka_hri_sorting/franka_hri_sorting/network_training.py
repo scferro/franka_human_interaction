@@ -14,7 +14,7 @@ import threading
 
 class TrainingMode(enum.Enum):
     SORTING_ONLY = "sorting_only"
-    GESTURES_ONLY = "gestures_only"
+    GESTURES_ONLY = "gestures_only" 
     BOTH = "both"
 
 class NetworkTrainingNode(Node):
@@ -39,8 +39,8 @@ class NetworkTrainingNode(Node):
         self.gesture_warning_time = self.get_parameter('gesture_warning_time').value
         self.prediction_timeout = self.get_parameter('prediction_timeout').value
 
-        if not self.training_path:
-            raise ValueError("Training images path parameter must be set")
+        if not self.training_path and self.training_mode != TrainingMode.GESTURES_ONLY:
+            raise ValueError("Training images path parameter must be set for non-gesture-only modes")
 
     def _init_clients_and_publishers(self):
         """Initialize service clients and publishers."""
@@ -67,16 +67,18 @@ class NetworkTrainingNode(Node):
         """Initialize state variables."""
         self.current_ros_msg = None
         self.current_image = None
+        self.display_window_created = False
         self.waiting_for_input = False
         self.waiting_for_gesture = False
         self.current_sorting_prediction = None
         self.current_gesture_prediction = None
 
     def _init_display(self):
-        """Initialize display thread."""
-        self.display_thread = threading.Thread(target=self.display_loop)
-        self.display_thread.daemon = True
-        self.display_thread.start()
+        """Initialize display thread if needed."""
+        if self.training_mode != TrainingMode.GESTURES_ONLY:
+            self.display_thread = threading.Thread(target=self.display_loop)
+            self.display_thread.daemon = True
+            self.display_thread.start()
 
     def notify_user(self, message: str):
         """Publish user notification."""
@@ -87,11 +89,15 @@ class NetworkTrainingNode(Node):
 
     def display_loop(self):
         """Image display thread."""
-        cv2.namedWindow('Training Image', cv2.WINDOW_NORMAL)
         while True:
-            if self.current_image is not None:
-                cv2.imshow('Training Image', self.current_image)
-            cv2.waitKey(1)
+            if self.training_mode != TrainingMode.GESTURES_ONLY:
+                if not self.display_window_created:
+                    cv2.namedWindow('Training Image', cv2.WINDOW_NORMAL)
+                    self.display_window_created = True
+                
+                if self.current_image is not None:
+                    cv2.imshow('Training Image', self.current_image)
+                cv2.waitKey(1)
             time.sleep(0.01)
 
     def get_gesture_prediction(self) -> bool:
@@ -169,7 +175,9 @@ class NetworkTrainingNode(Node):
                 self._handle_sorting_feedback(key)
                 self.train_gesture_network(label)
 
-        self.current_image = None
+        # Only clear image if we're not in gesture-only mode
+        if self.training_mode != TrainingMode.GESTURES_ONLY:
+            self.current_image = None
         self.waiting_for_input = False
 
     def _handle_sorting_feedback(self, key):
@@ -217,18 +225,19 @@ class NetworkTrainingNode(Node):
 
     def process_iteration(self):
         """Process one training iteration based on current mode."""
-        # Load and prepare image
-        image = self.load_random_image()
-        if image is None:
-            return
+        # Only load and prepare image for non-gesture-only modes
+        if self.training_mode != TrainingMode.GESTURES_ONLY:
+            image = self.load_random_image()
+            if image is None:
+                return
 
-        self.current_image = image
-        try:
-            rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            self.current_ros_msg = self.bridge.cv2_to_imgmsg(rgb_image, encoding='rgb8')
-        except CvBridgeError as e:
-            self.get_logger().error(f'CV Bridge error: {str(e)}')
-            return
+            self.current_image = image
+            try:
+                rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                self.current_ros_msg = self.bridge.cv2_to_imgmsg(rgb_image, encoding='rgb8')
+            except CvBridgeError as e:
+                self.get_logger().error(f'CV Bridge error: {str(e)}')
+                return
 
         # Handle different modes
         if self.training_mode == TrainingMode.SORTING_ONLY:
@@ -247,7 +256,9 @@ class NetworkTrainingNode(Node):
                 self.waiting_for_input = True
                 self.notify_user(f'Is the sorting prediction {self.current_sorting_prediction} correct? (Y/N)')
 
-        time.sleep(self.display_time)
+        # Only sleep for display in non-gesture-only modes
+        if self.training_mode != TrainingMode.GESTURES_ONLY:
+            time.sleep(self.display_time)
 
     def load_random_image(self):
         """Load a random image from the training folder."""
@@ -292,6 +303,8 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
+        if node.training_mode != TrainingMode.GESTURES_ONLY and node.display_window_created:
+            cv2.destroyAllWindows()
         node.destroy_node()
         rclpy.shutdown()
 

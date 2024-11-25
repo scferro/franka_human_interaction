@@ -24,6 +24,7 @@
 #include "franka_hri_interfaces/srv/create_box.hpp"
 #include "franka_hri_interfaces/srv/update_markers.hpp"
 #include "franka_hri_interfaces/srv/sort_net.hpp"
+#include "franka_hri_interfaces/srv/gest_net.hpp"
 
 #include <moveit/robot_model_loader/robot_model_loader.h>
 #include <moveit/robot_model/robot_model.h>
@@ -81,7 +82,19 @@ public:
         rmw_qos_profile_services_default,
         prediction_callback_group_
     );
+
     pretrain_network_client = create_client<std_srvs::srv::Empty>("pretrain_network");
+
+    // Home joint positions
+    home_joint_positions = {0.0, -0.132, 0.002, -2.244, 0.004, 2.111, 0.785};
+
+    // Create clients for gesture network services
+    train_gesture_client = create_client<franka_hri_interfaces::srv::GestNet>("train_gesture");
+    get_gesture_prediction_client = this->create_client<franka_hri_interfaces::srv::GestNet>(
+        "get_gesture_prediction",
+        rmw_qos_profile_services_default,
+        prediction_callback_group_
+    );
 
     gripper_homing_client = rclcpp_action::create_client<franka_msgs::action::Homing>(this, "panda_gripper/homing");
     gripper_grasping_client = rclcpp_action::create_client<franka_msgs::action::Grasp>(this, "panda_gripper/grasp");
@@ -110,27 +123,41 @@ public:
     planning_scene_interface = std::make_shared<moveit::planning_interface::PlanningSceneInterface>();
     move_group = std::make_shared<moveit::planning_interface::MoveGroupInterface>(shared_from_this(), "panda_manipulator");
 
-    double box_width = 2.;
-    double box_length = box_width;
+    double box_width = 3.;
     double box_height = 0.3;
 
     std_msgs::msg::String box_id;
-    box_id.data = "table";
+    box_id.data = "table_1";
 
     geometry_msgs::msg::Pose target_pose;
-    target_pose.position.x = box_width / 2 + 0.1;
+    target_pose.position.x = (box_width / 2 + 0.1) / 2;
     target_pose.position.y = 0.0;
-    target_pose.position.z = -(box_height / 2) - 0.001;
+    target_pose.position.z = -(box_height / 2);
     target_pose.orientation.x = 0.0;
     target_pose.orientation.y = 0.0;
     target_pose.orientation.z = 0.0;
     target_pose.orientation.w = 1.0;
 
     geometry_msgs::msg::Vector3 box_size;
-    box_size.x = box_width;
-    box_size.y = box_length;
+    box_size.x = box_width / 2 - 0.1;
+    box_size.y = box_width;
     box_size.z = box_height;
 
+    create_collision_box(target_pose, box_size, box_id);
+
+    target_pose.position.x = -target_pose.position.x;
+    box_id.data = "table_2";
+    create_collision_box(target_pose, box_size, box_id);
+
+    target_pose.position.x = 0.0;
+    target_pose.position.y = (box_width / 2 + 0.1) / 2;
+    box_size.y = box_width / 2 - 0.1;
+    box_size.x = box_width;
+    box_id.data = "table_3";
+    create_collision_box(target_pose, box_size, box_id);
+
+    target_pose.position.y = -target_pose.position.y;
+    box_id.data = "table_4";
     create_collision_box(target_pose, box_size, box_id);
   }
 
@@ -139,6 +166,7 @@ private:
   visualization_msgs::msg::MarkerArray block_markers;
   geometry_msgs::msg::Pose pile_0_start, pile_1_start;
   std::vector<int> pile_0_index, pile_1_index, sorted_index;
+  std::vector<double> home_joint_positions;
   int human_sort_input;
 
   rclcpp_action::Server<franka_hri_interfaces::action::EmptyAction>::SharedPtr action_server_sort_blocks;
@@ -158,6 +186,8 @@ private:
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr block_pub;
   rclcpp::CallbackGroup::SharedPtr markers_callback_group_;
   rclcpp::CallbackGroup::SharedPtr prediction_callback_group_;
+  rclcpp::Client<franka_hri_interfaces::srv::GestNet>::SharedPtr train_gesture_client;
+  rclcpp::Client<franka_hri_interfaces::srv::GestNet>::SharedPtr get_gesture_prediction_client;
   std::shared_ptr<tf2_ros::Buffer> tfBuffer;
   std::shared_ptr<tf2_ros::TransformListener> tfListener;
   std::shared_ptr<moveit::core::RobotModel> kinematic_model;
@@ -167,13 +197,12 @@ private:
                         std::shared_ptr<std_srvs::srv::Empty::Response> response)
   {
     // Start in ready position 
-    std::vector<double> joint_positions = {0.0, -0.214, 0.002, -2.475, 0.004, 2.256, 0.793};
-    move_to_joints(joint_positions);
+    move_to_joints(home_joint_positions);
 
     auto overhead_scan_pose = geometry_msgs::msg::PoseStamped();
     overhead_scan_pose.header.stamp = this->get_clock()->now();
     overhead_scan_pose.header.frame_id = "world";
-    overhead_scan_pose.pose.position.x = 0.35;
+    overhead_scan_pose.pose.position.x = 0.5;
     overhead_scan_pose.pose.position.y = 0.0;
     overhead_scan_pose.pose.position.z = 0.3;
     overhead_scan_pose.pose.orientation.x = 1.0;
@@ -197,135 +226,147 @@ private:
 
   void sort_blocks(const std::shared_ptr<rclcpp_action::ServerGoalHandle<franka_hri_interfaces::action::EmptyAction>> goal_handle)
   {
-    // Start in ready position 
-    std::vector<double> joint_positions = {0.0, -0.214, 0.002, -2.475, 0.004, 2.256, 0.793};
-    move_to_joints(joint_positions);
+      // Start in ready position 
+      move_to_joints(home_joint_positions);
 
-    auto overhead_scan_pose = geometry_msgs::msg::PoseStamped();
-    overhead_scan_pose.header.stamp = this->get_clock()->now();
-    overhead_scan_pose.header.frame_id = "world";
-    overhead_scan_pose.pose.position.x = 0.45;
-    overhead_scan_pose.pose.position.y = 0.0;
-    overhead_scan_pose.pose.position.z = 0.2;
-    overhead_scan_pose.pose.orientation.x = 1.0;
-    overhead_scan_pose.pose.orientation.y = 0.0;
-    overhead_scan_pose.pose.orientation.z = 0.0;
-    overhead_scan_pose.pose.orientation.w = 0.0;
+      auto overhead_scan_pose = geometry_msgs::msg::PoseStamped();
+      overhead_scan_pose.header.stamp = this->get_clock()->now();
+      overhead_scan_pose.header.frame_id = "world";
+      overhead_scan_pose.pose.position.x = 0.5;
+      overhead_scan_pose.pose.position.y = 0.0;
+      overhead_scan_pose.pose.position.z = 0.3;
+      overhead_scan_pose.pose.orientation.x = 1.0;
+      overhead_scan_pose.pose.orientation.y = 0.0;
+      overhead_scan_pose.pose.orientation.z = 0.0;
+      overhead_scan_pose.pose.orientation.w = 0.0;
 
-    double planning_time = 20.;
-    double vel_factor = 0.3;
-    double accel_factor = 0.1;
+      double planning_time = 20.;
+      double vel_factor = 0.3;
+      double accel_factor = 0.1;
 
-    move_to_pose(overhead_scan_pose, planning_time, vel_factor, accel_factor);
+      move_to_pose(overhead_scan_pose, planning_time, vel_factor, accel_factor);
 
-    // Create promise/future pair for initial scan
-    auto scan_response_received = std::make_shared<std::promise<franka_hri_interfaces::srv::UpdateMarkers::Response::SharedPtr>>();
-    auto scan_future_result = scan_response_received->get_future();
+      // Create promise/future pair for initial scan
+      auto scan_response_received = std::make_shared<std::promise<franka_hri_interfaces::srv::UpdateMarkers::Response::SharedPtr>>();
+      auto scan_future_result = scan_response_received->get_future();
 
-    auto request = std::make_shared<franka_hri_interfaces::srv::UpdateMarkers::Request>();
-    request->input_markers = block_markers;
-    request->update_scale = true;
+      auto request = std::make_shared<franka_hri_interfaces::srv::UpdateMarkers::Request>();
+      request->input_markers = block_markers;
+      request->update_scale = true;
 
-    // Create callback for initial scan
-    auto scan_callback = [this, scan_response_received](
-        rclcpp::Client<franka_hri_interfaces::srv::UpdateMarkers>::SharedFuture future) {
-        try {
-            auto result = future.get();
-            this->block_markers = result->output_markers;
-            scan_response_received->set_value(result);
-            RCLCPP_INFO(this->get_logger(), "Initial scan complete");
-        } catch (const std::exception& e) {
-            RCLCPP_ERROR(this->get_logger(), "Error in scan callback: %s", e.what());
-        }
-    };
+      // Create callback for initial scan
+      auto scan_callback = [this, scan_response_received](
+          rclcpp::Client<franka_hri_interfaces::srv::UpdateMarkers>::SharedFuture future) {
+          try {
+              auto result = future.get();
+              this->block_markers = result->output_markers;
+              scan_response_received->set_value(result);
+              RCLCPP_INFO(this->get_logger(), "Initial scan complete");
+          } catch (const std::exception& e) {
+              RCLCPP_ERROR(this->get_logger(), "Error in scan callback: %s", e.what());
+          }
+      };
 
-    int count = 0;
-    while ((!scan_overhead_cli->wait_for_service(1s)) && (count < 5)) {
-      RCLCPP_INFO(this->get_logger(), "Waiting for scan_overhead service");
-      count++;
-    }
-
-    scan_overhead_cli->async_send_request(request, scan_callback);
-
-    // Wait for initial scan with timeout
-    if (scan_future_result.wait_for(std::chrono::seconds(5)) == std::future_status::timeout) {
-        RCLCPP_ERROR(this->get_logger(), "Initial scan failed - timeout");
-        return;
-    }
-
-    for (std::vector<visualization_msgs::msg::Marker>::size_type i = 0; i < (block_markers.markers.size()); i++) {
-      auto it = std::find(sorted_index.begin(), sorted_index.end(), i);
-      bool sorted = false;
-
-      if (it != sorted_index.end()) {
-          sorted = true;
+      int count = 0;
+      while ((!scan_overhead_cli->wait_for_service(1s)) && (count < 5)) {
+          RCLCPP_INFO(this->get_logger(), "Waiting for scan_overhead service");
+          count++;
       }
 
-      if (!sorted) { 
-        bool update_scale = true;
-        scan_block(i, update_scale);
+      scan_overhead_cli->async_send_request(request, scan_callback);
 
-        grab_block(i);
+      // Wait for initial scan with timeout
+      if (scan_future_result.wait_for(std::chrono::seconds(5)) == std::future_status::timeout) {
+          RCLCPP_ERROR(this->get_logger(), "Initial scan failed - timeout");
+          return;
+      }
 
-        double pred = get_network_prediction(i);
-        RCLCPP_INFO(this->get_logger(), "Prediction: %f", pred);
-        int stack_id;
-        auto wait_pose = overhead_scan_pose;
+      for (std::vector<visualization_msgs::msg::Marker>::size_type i = 0; i < (block_markers.markers.size()); i++) {
+          auto it = std::find(sorted_index.begin(), sorted_index.end(), i);
+          bool sorted = false;
 
-        human_sort_input = -1;
+          if (it != sorted_index.end()) {
+              sorted = true;
+          }
 
-        if (pred >= 0.5) {
-          stack_id = 1;
-          wait_pose.pose.position.y = -0.2;
-        } else {
-          stack_id = 0;
-          wait_pose.pose.position.y = 0.2;
-        }
-        vel_factor = 0.6;
-        move_to_pose(wait_pose, planning_time, vel_factor, accel_factor);
+          if (!sorted) { 
+              bool update_scale = true;
+              scan_block(i, update_scale);
+              grab_block(i);
 
-        double hi_conf_thresh = 0.15;
-        
-        if ((pred > hi_conf_thresh) && (pred < (1. - hi_conf_thresh))) {
-          auto start_time = std::chrono::steady_clock::now();
-          int timeout = 5;
-          while (human_sort_input == -1)
-          {
-              auto current_time = std::chrono::steady_clock::now();
-              auto elapsed_time = std::chrono::duration_cast<std::chrono::seconds>(current_time - start_time);
+              // Get initial sorting prediction
+              double sort_pred = get_network_prediction(i);
+              RCLCPP_INFO(this->get_logger(), "Sort prediction: %f", sort_pred);
               
-              if (elapsed_time.count() >= timeout) 
-              {
-                  RCLCPP_INFO(this->get_logger(), "Timeout waiting for input");
-                  break;
-              }          
-          }
-          RCLCPP_INFO(this->get_logger(), "Human input: %d", human_sort_input);
-          if (human_sort_input == 0) {
-            if (stack_id==1) {
-              stack_id = 0;
-            } else if (stack_id==0) {
-              stack_id = 1;
-            }
-          }
-        } else {
-          if (pred < 0.5) {
-            stack_id = 0;
-          } else {
-            stack_id = 1;
-          }
-        }
+              // Determine initial stack based on sorting prediction
+              int predicted_stack = (sort_pred >= 0.5) ? 1 : 0;
+              auto wait_pose = overhead_scan_pose;
+              wait_pose.pose.position.y = (predicted_stack == 1) ? 0.2 : -0.2;
+              
+              // Move to position for gesture recognition
+              vel_factor = 0.6;
+              move_to_pose(wait_pose, planning_time, vel_factor, accel_factor);
 
-        place_in_stack(i, stack_id);
-        train_network(i, stack_id);
-        sorted_index.push_back(i);
+              // Brief pause, then get gesture prediction
+              std::this_thread::sleep_for(std::chrono::milliseconds(800));
+              double gesture_pred = get_gesture_prediction();
+              RCLCPP_INFO(this->get_logger(), "Gesture prediction: %f", gesture_pred);
+              
+              // Determine final stack based on gesture
+              int final_stack = predicted_stack;
+              if (gesture_pred < 0.5) {
+                  final_stack = (predicted_stack == 1) ? 0 : 1;
+                  RCLCPP_INFO(this->get_logger(), "Gesture indicates opposite stack");
+              }
 
-        // Move back to ready position 
-        std::vector<double> joint_positions = {0.0, -0.214, 0.002, -2.475, 0.004, 2.256, 0.793};
-        move_to_joints(joint_positions);  
+              // Place block in chosen stack
+              place_in_stack(i, final_stack);
+              
+              // Wait for human verification
+              human_sort_input = -1;
+              auto start_time = std::chrono::steady_clock::now();
+              int timeout = 3;
+              
+              RCLCPP_INFO(this->get_logger(), "Waiting for human verification...");
+              while (human_sort_input == -1) {
+                  auto current_time = std::chrono::steady_clock::now();
+                  auto elapsed_time = std::chrono::duration_cast<std::chrono::seconds>(current_time - start_time);
+                  
+                  if (elapsed_time.count() >= timeout) {
+                      RCLCPP_INFO(this->get_logger(), "No human input received, assuming correct");
+                      human_sort_input = 1;
+                      break;
+                  }
+              }
+
+              // Process human verification
+              if (human_sort_input == 0) {
+                  RCLCPP_INFO(this->get_logger(), "Incorrect sorting detected, moving block");
+                  
+                  // Move block to opposite stack
+                  grab_block(i);
+                  int corrected_stack = (final_stack == 1) ? 0 : 1;
+                  place_in_stack(i, corrected_stack);
+                  
+                  // Train networks with corrected labels
+                  train_network(i, corrected_stack);  // Train sorting network
+                  train_gesture_network(corrected_stack != predicted_stack);  // Train gesture network
+              } else {
+                  // Train networks with predicted labels
+                  train_network(i, final_stack);  // Train sorting network
+                  train_gesture_network(final_stack == predicted_stack);  // Train gesture network
+              }
+
+              sorted_index.push_back(i);
+              
+              // Move back to ready position
+        
+              move_to_joints(home_joint_positions);
+          }
       }
-    }
-    move_to_pose(overhead_scan_pose, planning_time, vel_factor, accel_factor);
+      
+      // Return to overhead scan pose when finished
+      move_to_pose(overhead_scan_pose, planning_time, vel_factor, accel_factor);
   }
 
   void human_sorting_callback(const std_msgs::msg::Int8::SharedPtr msg)
@@ -351,6 +392,82 @@ private:
       }
 
       auto result_future = train_network_client->async_send_request(request);
+  }
+
+  double get_gesture_prediction()
+  {
+      auto request = std::make_shared<franka_hri_interfaces::srv::GestNet::Request>();
+
+      while (!get_gesture_prediction_client->wait_for_service(std::chrono::seconds(1)))
+      {
+          if (!rclcpp::ok())
+          {
+              RCLCPP_ERROR(this->get_logger(), "Gesture prediction service interrupted");
+              return -1;
+          }
+          RCLCPP_INFO(this->get_logger(), "Waiting for gesture prediction service");
+      }
+
+      // Use a promise/future pair to handle the async response
+      auto response_received = std::make_shared<std::promise<franka_hri_interfaces::srv::GestNet::Response::SharedPtr>>();
+      auto future_result = response_received->get_future();
+
+      auto callback = [response_received](rclcpp::Client<franka_hri_interfaces::srv::GestNet>::SharedFuture future) {
+          response_received->set_value(future.get());
+      };
+
+      // Send the request with a callback
+      get_gesture_prediction_client->async_send_request(request, callback);
+
+      // Wait for the response with a timeout
+      if (future_result.wait_for(std::chrono::seconds(3)) == std::future_status::timeout) {
+          RCLCPP_ERROR(this->get_logger(), "Failed to get gesture prediction - timeout");
+          return -1;
+      }
+
+      auto result = future_result.get();
+      RCLCPP_INFO(this->get_logger(), "Gesture prediction: %f", result->prediction);
+      return result->prediction;
+  }
+
+  void train_gesture_network(bool was_correct)
+  {
+      auto request = std::make_shared<franka_hri_interfaces::srv::GestNet::Request>();
+      request->label = was_correct ? 1 : 0;
+
+      while (!train_gesture_client->wait_for_service(std::chrono::seconds(1)))
+      {
+          if (!rclcpp::ok())
+          {
+              RCLCPP_ERROR(this->get_logger(), "Gesture training service interrupted");
+              return;
+          }
+          RCLCPP_INFO(this->get_logger(), "Waiting for gesture training service");
+      }
+
+      // Create promise/future pair for handling response
+      auto response_received = std::make_shared<std::promise<franka_hri_interfaces::srv::GestNet::Response::SharedPtr>>();
+      auto future_result = response_received->get_future();
+
+      auto callback = [this, response_received](
+          rclcpp::Client<franka_hri_interfaces::srv::GestNet>::SharedFuture future) {
+          try {
+              auto result = future.get();
+              response_received->set_value(result);
+              RCLCPP_INFO(this->get_logger(), "Gesture network training complete");
+          } catch (const std::exception& e) {
+              RCLCPP_ERROR(this->get_logger(), "Error in gesture training callback: %s", e.what());
+          }
+      };
+
+      // Send request asynchronously with callback
+      train_gesture_client->async_send_request(request, callback);
+
+      // Wait with timeout for response
+      if (future_result.wait_for(std::chrono::seconds(5)) == std::future_status::timeout) {
+          RCLCPP_ERROR(this->get_logger(), "Failed to train gesture network - timeout");
+          return;
+      }
   }
 
   double get_network_prediction(int index)
@@ -506,7 +623,7 @@ private:
 
     move_to_pose(drop_pose, planning_time, vel_factor, accel_factor);
 
-    double width = 0.04;
+    double width = 0.05;
     double speed = 0.2;
     double force = 1.;
     send_grasp_goal(width, speed, force);
@@ -520,7 +637,8 @@ private:
     request->markers_to_update = update;
 
     auto retreat_pose = drop_pose;
-    retreat_pose.pose.position.z += 0.15;
+    retreat_pose.pose.position.x += -0.05;
+    retreat_pose.pose.position.z += 0.25;
     move_to_pose(retreat_pose, planning_time, vel_factor, accel_factor);
 
     // Create promise/future pair to handle async response
