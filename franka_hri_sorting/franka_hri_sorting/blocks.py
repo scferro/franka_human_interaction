@@ -28,6 +28,11 @@ import rclpy.time
 class Blocks(Node):
     def __init__(self):
         super().__init__('blocks')
+    
+        # Create callback groups for concurrent service handling
+        self.marker_callback_group = rclpy.callback_groups.ReentrantCallbackGroup()
+        self.prediction_callback_group = rclpy.callback_groups.ReentrantCallbackGroup()
+        
 
         # Subscriber to the d405 Image topic
         self.img_sub = self.create_subscription(
@@ -57,7 +62,12 @@ class Blocks(Node):
         self.scan_overhead_srv = self.create_service(UpdateMarkers, 'scan_overhead', self.scan_overhead_callback)
 
         # Create update_marker service
-        self.update_markers_srv = self.create_service(UpdateMarkers, 'update_markers', self.update_markers_callback)
+        self.update_markers_srv = self.create_service(
+            UpdateMarkers, 
+            'update_markers', 
+            self.update_markers_callback,
+            callback_group=self.marker_callback_group
+        )
 
         # Create pre train blocks service
         self.pretrain_network_srv = self.create_service(Empty, 'pretrain_network', self.pretrain_network_callback)
@@ -66,8 +76,18 @@ class Blocks(Node):
         self.reset_blocks_srv = self.create_service(Empty, 'reset_blocks', self.reset_blocks_callback)
 
         # Create the nn object and prediction and training services
-        self.train_network_srv = self.create_service(SortNet, 'train_network', self.train_network_callback)
-        self.get_network_prediction_srv = self.create_service(SortNet, 'get_network_prediction', self.get_network_prediction_callback)
+        self.train_network_srv = self.create_service(
+            SortNet, 
+            'train_network', 
+            self.train_network_callback,
+            callback_group=self.prediction_callback_group
+        )
+        self.get_network_prediction_srv = self.create_service(
+            SortNet, 
+            'get_network_prediction', 
+            self.get_network_prediction_callback,
+            callback_group=self.prediction_callback_group
+        )
 
         # Add in __init__
         self.train_sorting_client = self.create_client(SortNet, 'train_sorting')
@@ -102,7 +122,7 @@ class Blocks(Node):
 
         self.get_logger().info("Blocks node started successfully!")
 
-    def pretrain_network_callback(self, request, response):
+    async def pretrain_network_callback(self, request, response):
         self.block_markers = MarkerArray()
         self.block_images = []
 
@@ -134,14 +154,21 @@ class Blocks(Node):
                     req.image = ros_msg
                     req.label = label
                     
-                    # Call training service
+                    # Call training service with timeout
                     future = self.train_sorting_client.call_async(req)
-                    rclpy.spin_until_future_complete(self, future)
+                    try:
+                        await rclpy.task.Future.wait_for(future, timeout=5.0)
+                    except TimeoutError:
+                        self.get_logger().warn("Training request timed out")
+                        continue
+                    except Exception as e:
+                        self.get_logger().error(f"Error in training request: {str(e)}")
+                        continue
                     
                 except Exception as e:
                     self.get_logger().error(f"Error training network: {str(e)}")
 
-        self.get_logger().info("Pre-trained network.")
+        self.get_logger().info("Pre-training complete")
         self.block_images = []
         self.block_markers = MarkerArray()
         return response
@@ -154,7 +181,7 @@ class Blocks(Node):
     
         return response
 
-    def train_network_callback(self, request, response):
+    async def train_network_callback(self, request, response):
         # Get block index and label from message
         block_index = request.index
         label = request.label
@@ -172,17 +199,25 @@ class Blocks(Node):
                 req.image = ros_msg
                 req.label = label
                 
-                # Call training service
+                # Call training service with timeout
                 future = self.train_sorting_client.call_async(req)
-                rclpy.spin_until_future_complete(self, future)
-                
+                try:
+                    await rclpy.task.Future.wait_for(future, timeout=5.0)
+                except TimeoutError:
+                    self.get_logger().warn("Training request timed out")
+                    continue
+                except Exception as e:
+                    self.get_logger().error(f"Error in training request: {str(e)}")
+                    continue
+                    
             except Exception as e:
                 self.get_logger().error(f"Error training network: {str(e)}")
 
-        self.get_logger().info("Trained network.")
+        self.get_logger().info("Training complete")
         return response
 
-    def get_network_prediction_callback(self, request, response):
+
+    async def get_network_prediction_callback(self, request, response):
         block_index = request.index
         images = self.block_images[block_index]
         predictions = []
@@ -192,42 +227,41 @@ class Blocks(Node):
         # Get prediction for each image
         for img in images:
             try:
-                self.get_logger().info("converting image.")
+                self.get_logger().info("Converting image.")
                 rgb_image = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) 
                 ros_msg = self.bridge.cv2_to_imgmsg(rgb_image, encoding='rgb8')
 
-                self.get_logger().info("sending request.")
+                self.get_logger().info("Sending request.")
                 req = SortNet.Request()
                 req.image = ros_msg
                 
                 # Send request and wait with timeout
                 future = self.get_sorting_prediction_client.call_async(req)
                 
-                # Create timeout
-                timeout = 5.0  # 5 seconds
-                start_time = self.get_clock().now()
-                
-                # Wait for result with timeout
-                while (self.get_clock().now() - start_time).nanoseconds * 1e-9 < timeout:
-                    if future.done():
-                        result = future.result()
-                        if result is not None:
-                            predictions.append(result.prediction)
-                            self.get_logger().info("Got prediction for 1 image.")
-                        break
-                    rclpy.spin_once(self, timeout_sec=0.1)
-                        
+                try:
+                    # Wait for result with timeout
+                    result = await rclpy.task.Future.wait_for(future, timeout=5.0)
+                    if result is not None:
+                        predictions.append(result.prediction)
+                        self.get_logger().info("Got prediction for 1 image.")
+                except TimeoutError:
+                    self.get_logger().warn("Prediction request timed out")
+                    continue
+                except Exception as e:
+                    self.get_logger().error(f"Error waiting for prediction: {str(e)}")
+                    continue
+                    
             except Exception as e:
                 self.get_logger().error(f"Error getting prediction: {str(e)}")
                 
         # Return average prediction
         if predictions:
             response.prediction = float(np.mean(predictions))
-            self.get_logger().info(f"Prediction: {response.prediction}")
+            self.get_logger().info(f"Final prediction: {response.prediction}")
         else:
             response.prediction = -1.0
+            self.get_logger().warn("No predictions received")
             
-        self.get_logger().info("Got prediction.")
         return response
 
     def preprocess_image(self, image):
@@ -717,10 +751,19 @@ def main(args=None):
     """The main function."""
     rclpy.init(args=args)
     node = Blocks()
-    executor = rclpy.executors.MultiThreadedExecutor()
+    
+    # Create multithreaded executor
+    executor = rclpy.executors.MultiThreadedExecutor(num_threads=8)
     executor.add_node(node)
-    executor.spin()
-    rclpy.shutdown()
+    
+    try:
+        executor.spin()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        executor.shutdown()
+        node.destroy_node()
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

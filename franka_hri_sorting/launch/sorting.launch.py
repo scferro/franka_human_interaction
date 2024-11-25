@@ -15,6 +15,7 @@ def generate_launch_description():
     # Define paths for model saving/loading
     default_models_dir = os.path.join(franka_hri_sorting_dir, 'models')
     default_save_dir = default_models_dir
+    rviz_config_file = os.path.join(franka_hri_sorting_dir, 'config', 'sorting.rviz')
     
     # Ensure directories exist
     os.makedirs(default_models_dir, exist_ok=True)
@@ -77,7 +78,10 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(
             os.path.join(franka_moveit_config_dir, 'launch', 'rviz.launch.py')
         ),
-        launch_arguments={'robot_ip': 'panda0.robot'}.items(),
+        launch_arguments={
+            'robot_ip': 'panda0.robot',
+            'rviz_config': rviz_config_file
+        }.items(),
         condition=IfCondition(PythonExpression(["'", LaunchConfiguration('mode'), "' == 'robot'"]))
     )
 
