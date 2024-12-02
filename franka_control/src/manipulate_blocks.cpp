@@ -14,6 +14,7 @@
 #include <franka_msgs/action/homing.hpp>
 #include <std_msgs/msg/int8.hpp>
 #include <std_srvs/srv/empty.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <rclcpp/callback_group.hpp>
 
 #include <tf2_ros/transform_listener.h>
@@ -96,6 +97,13 @@ public:
         prediction_callback_group_
     );
 
+    // Add hands_detected subscriber
+    hands_detected_sub = this->create_subscription<std_msgs::msg::Bool>(
+      "hands_detected",
+      10,
+      std::bind(&ManipulateBlocks::hands_detected_callback, this, std::placeholders::_1)
+    );
+
     gripper_homing_client = rclcpp_action::create_client<franka_msgs::action::Homing>(this, "panda_gripper/homing");
     gripper_grasping_client = rclcpp_action::create_client<franka_msgs::action::Grasp>(this, "panda_gripper/grasp");
     
@@ -168,6 +176,8 @@ private:
   std::vector<int> pile_0_index, pile_1_index, sorted_index;
   std::vector<double> home_joint_positions;
   int human_sort_input;
+  bool hands_detected;
+  bool waiting_for_human;
 
   rclcpp_action::Server<franka_hri_interfaces::action::EmptyAction>::SharedPtr action_server_sort_blocks;
   rclcpp_action::Client<franka_msgs::action::Grasp>::SharedPtr gripper_grasping_client;
@@ -188,6 +198,7 @@ private:
   rclcpp::CallbackGroup::SharedPtr prediction_callback_group_;
   rclcpp::Client<franka_hri_interfaces::srv::GestNet>::SharedPtr train_gesture_client;
   rclcpp::Client<franka_hri_interfaces::srv::GestNet>::SharedPtr get_gesture_prediction_client;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr hands_detected_sub;
   std::shared_ptr<tf2_ros::Buffer> tfBuffer;
   std::shared_ptr<tf2_ros::TransformListener> tfListener;
   std::shared_ptr<moveit::core::RobotModel> kinematic_model;
@@ -282,92 +293,171 @@ private:
       }
 
       for (std::vector<visualization_msgs::msg::Marker>::size_type i = 0; i < (block_markers.markers.size()); i++) {
-          auto it = std::find(sorted_index.begin(), sorted_index.end(), i);
-          bool sorted = false;
+        auto it = std::find(sorted_index.begin(), sorted_index.end(), i);
+        bool sorted = false;
 
-          if (it != sorted_index.end()) {
-              sorted = true;
+        if (it != sorted_index.end()) {
+            sorted = true;
+        }
+
+        if (!sorted) { 
+          bool update_scale = true;
+          scan_block(i, update_scale);
+          grab_block(i);
+
+          // Get initial sorting prediction
+          double sort_pred = get_network_prediction(i);
+          RCLCPP_INFO(this->get_logger(), "Sort prediction: %f", sort_pred);
+          
+          // Determine initial stack based on sorting prediction
+          int predicted_stack = (sort_pred >= 0.5) ? 1 : 0;
+          auto wait_pose = overhead_scan_pose;
+          wait_pose.pose.position.y = (predicted_stack == 1) ? 0.2 : -0.2;
+          
+          // Move to position for gesture recognition
+          vel_factor = 0.6;
+          move_to_pose(wait_pose, planning_time, vel_factor, accel_factor);
+
+          // Brief pause, then get gesture prediction
+          std::this_thread::sleep_for(std::chrono::milliseconds(800));
+          double gesture_pred = get_gesture_prediction();
+          RCLCPP_INFO(this->get_logger(), "Gesture prediction: %f", gesture_pred);
+          
+          // Determine final stack based on gesture
+          int final_stack = predicted_stack;
+          if (gesture_pred < 0.5) {
+              final_stack = (predicted_stack == 1) ? 0 : 1;
+              RCLCPP_INFO(this->get_logger(), "Gesture indicates opposite stack");
           }
 
-          if (!sorted) { 
-              bool update_scale = true;
-              scan_block(i, update_scale);
-              grab_block(i);
-
-              // Get initial sorting prediction
-              double sort_pred = get_network_prediction(i);
-              RCLCPP_INFO(this->get_logger(), "Sort prediction: %f", sort_pred);
+          // Place block in chosen stack
+          place_in_stack(i, final_stack);
+          
+          // Start monitoring for human intervention
+          waiting_for_human = true;
+          auto start_time = std::chrono::steady_clock::now();
+          bool human_moved_block = false;
+          int timeout_seconds = 5;
+          
+          RCLCPP_INFO(this->get_logger(), "Waiting for potential human intervention...");
+          
+          while (waiting_for_human) {
+            if (hands_detected) {
+              RCLCPP_INFO(this->get_logger(), "Hands detected - waiting for human to finish moving block");
+              human_moved_block = true;
               
-              // Determine initial stack based on sorting prediction
-              int predicted_stack = (sort_pred >= 0.5) ? 1 : 0;
-              auto wait_pose = overhead_scan_pose;
-              wait_pose.pose.position.y = (predicted_stack == 1) ? 0.2 : -0.2;
+              // Reset timeout when hands are detected
+              start_time = std::chrono::steady_clock::now();
               
-              // Move to position for gesture recognition
-              vel_factor = 0.6;
-              move_to_pose(wait_pose, planning_time, vel_factor, accel_factor);
-
-              // Brief pause, then get gesture prediction
-              std::this_thread::sleep_for(std::chrono::milliseconds(800));
-              double gesture_pred = get_gesture_prediction();
-              RCLCPP_INFO(this->get_logger(), "Gesture prediction: %f", gesture_pred);
-              
-              // Determine final stack based on gesture
-              int final_stack = predicted_stack;
-              if (gesture_pred < 0.5) {
-                  final_stack = (predicted_stack == 1) ? 0 : 1;
-                  RCLCPP_INFO(this->get_logger(), "Gesture indicates opposite stack");
+              // Wait for hands to be removed
+              while (hands_detected) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
               }
-
-              // Place block in chosen stack
-              place_in_stack(i, final_stack);
+              break;
+            }
+            
+            // Check timeout
+            auto current_time = std::chrono::steady_clock::now();
+            auto elapsed_time = std::chrono::duration_cast<std::chrono::seconds>(current_time - start_time);
+            if (elapsed_time.count() >= timeout_seconds) {
+              RCLCPP_INFO(this->get_logger(), "Timeout reached - no human intervention detected");
+              waiting_for_human = false;
+              break;
+            }
+            
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+          }
+          
+          if (human_moved_block) {
+              RCLCPP_INFO(this->get_logger(), "Human moved block - updating tracking");
               
-              // Wait for human verification
-              human_sort_input = -1;
-              auto start_time = std::chrono::steady_clock::now();
-              int timeout = 3;
-              
-              RCLCPP_INFO(this->get_logger(), "Waiting for human verification...");
-              while (human_sort_input == -1) {
-                  auto current_time = std::chrono::steady_clock::now();
-                  auto elapsed_time = std::chrono::duration_cast<std::chrono::seconds>(current_time - start_time);
+              // Update stack tracking - remove from original stack and add to opposite
+              if (final_stack == 0) {
+                  // Remove from stack 0's tracking
+                  pile_0_index.pop_back();
+                  // Add to stack 1's tracking
+                  pile_1_index.push_back(i);
                   
-                  if (elapsed_time.count() >= timeout) {
-                      RCLCPP_INFO(this->get_logger(), "No human input received, assuming correct");
-                      human_sort_input = 1;
-                      break;
-                  }
-              }
-
-              // Process human verification
-              if (human_sort_input == 0) {
-                  RCLCPP_INFO(this->get_logger(), "Incorrect sorting detected, moving block");
+                  // Remove the old collision object
+                  std::string id_string = std::to_string(i);
+                  auto block_id = std_msgs::msg::String();
+                  block_id.data = id_string;
+                  remove_collision_box(block_id);
                   
-                  // Move block to opposite stack
-                  grab_block(i);
-                  int corrected_stack = (final_stack == 1) ? 0 : 1;
-                  place_in_stack(i, corrected_stack);
+                  // Update marker position
+                  auto marker = block_markers.markers[i];
+                  marker.pose = pile_1_start;
+                  marker.pose.position.z = (pile_1_index.size() > 1) ? 
+                      block_markers.markers[pile_1_index[pile_1_index.size()-2]].pose.position.z + marker.scale.z : 
+                      pile_1_start.position.z + (marker.scale.z / 2);
+                  
+                  // Update markers
+                  auto request = std::make_shared<franka_hri_interfaces::srv::UpdateMarkers::Request>();
+                  marker.action = 0;
+                  request->input_markers.markers.push_back(marker);
+                  std::vector<int> update = {i};
+                  request->markers_to_update = update;
+                  
+                  auto future = update_markers_cli->async_send_request(request);
+                  auto result = future.get();
+                  block_markers = result->output_markers;
+                  
+                  // Create new collision object at updated position
+                  create_collision_box(marker.pose, marker.scale, block_id);
                   
                   // Train networks with corrected labels
-                  train_network(i, corrected_stack);  // Train sorting network
-                  train_gesture_network(corrected_stack != predicted_stack);  // Train gesture network
+                  train_network(i, 1);  // Train sorting network
+                  train_gesture_network(final_stack != predicted_stack);  // Train gesture network
+                  
               } else {
-                  // Train networks with predicted labels
-                  train_network(i, final_stack);  // Train sorting network
-                  train_gesture_network(final_stack == predicted_stack);  // Train gesture network
+                  // Remove from stack 1's tracking
+                  pile_1_index.pop_back();
+                  // Add to stack 0's tracking
+                  pile_0_index.push_back(i);
+                  
+                  // First remove the old collision object
+                  std::string id_string = std::to_string(i);
+                  auto block_id = std_msgs::msg::String();
+                  block_id.data = id_string;
+                  remove_collision_box(block_id);
+                  
+                  // Update marker position
+                  auto marker = block_markers.markers[i];
+                  marker.pose = pile_0_start;
+                  marker.pose.position.z = (pile_0_index.size() > 1) ? 
+                      block_markers.markers[pile_0_index[pile_0_index.size()-2]].pose.position.z + marker.scale.z : 
+                      pile_0_start.position.z + (marker.scale.z / 2);
+                  
+                  // Update markers
+                  auto request = std::make_shared<franka_hri_interfaces::srv::UpdateMarkers::Request>();
+                  marker.action = 0;
+                  request->input_markers.markers.push_back(marker);
+                  std::vector<int> update = {i};
+                  request->markers_to_update = update;
+                  
+                  auto future = update_markers_cli->async_send_request(request);
+                  auto result = future.get();
+                  block_markers = result->output_markers;
+                  
+                  // Create new collision object at updated position
+                  create_collision_box(marker.pose, marker.scale, block_id);
+                  
+                  // Train networks with corrected labels
+                  train_network(i, 0);  // Train sorting network
+                  train_gesture_network(final_stack != predicted_stack);  // Train gesture network
               }
-
-              sorted_index.push_back(i);
-              
-              // Move back to ready position
-        
-              move_to_joints(home_joint_positions);
           }
+
+          sorted_index.push_back(i);
+
+          // Move to safe home position
+          move_to_joints(home_joint_positions);
+        }
       }
       
-      // Return to overhead scan pose when finished
+      // Move back to overhead scan pose when finished
       move_to_pose(overhead_scan_pose, planning_time, vel_factor, accel_factor);
-  }
+    }
 
   void human_sorting_callback(const std_msgs::msg::Int8::SharedPtr msg)
   {
@@ -1000,6 +1090,16 @@ void move_to_joints(const std::vector<double>& joint_positions)
           RCLCPP_ERROR(this->get_logger(), "Gripper action timed out");
           return;
       }
+  }
+
+  void hands_detected_callback(const std_msgs::msg::Bool::SharedPtr msg)
+  {
+    hands_detected = msg->data;
+    
+    if (waiting_for_human && !hands_detected) {
+      // Hands were present but now gone - trigger block update
+      waiting_for_human = false;
+    }
   }
 
  void marker_array_callback(const visualization_msgs::msg::MarkerArray::SharedPtr msg)
