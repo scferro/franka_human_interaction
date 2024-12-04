@@ -34,6 +34,10 @@ class Blocks(Node):
         self.marker_callback_group = rclpy.callback_groups.ReentrantCallbackGroup()
         self.prediction_callback_group = rclpy.callback_groups.ReentrantCallbackGroup()
         self.network_callback_group = rclpy.callback_groups.ReentrantCallbackGroup()
+
+        # Parameter for x-axis division
+        self.declare_parameter('scan_position_x', 0.5)
+        self.scan_position_x = self.get_parameter('scan_position_x').value
         
         # Subscriber to the d405 Image topic
         self.img_sub = self.create_subscription(
@@ -173,10 +177,19 @@ class Blocks(Node):
             marker = markers[i]
             images = self.block_images[i]
             
-            # Get label based on y position
-            label = 0
-            if marker.pose.position.y > 0:
-                label = 1
+            # Determine category based on position relative to scan_position_x and y=0
+            # Categories:
+            # 0: Back left  (x < scan_position_x, y < 0)
+            # 1: Front left (x < scan_position_x, y > 0)
+            # 2: Back right (x > scan_position_x, y < 0)
+            # 3: Front right (x > scan_position_x, y > 0)
+            x_pos = marker.pose.position.x
+            y_pos = marker.pose.position.y
+            
+            if x_pos < self.scan_position_x:
+                label = 0 if y_pos < 0 else 1
+            else:
+                label = 2 if y_pos < 0 else 3
 
             # Train network using each image
             for img in images:
@@ -207,7 +220,7 @@ class Blocks(Node):
         self.get_logger().info("Pre-training complete")
         self.block_images = []
         self.block_markers = MarkerArray()
-        return response
+        return response                                                        
 
     def reset_blocks_callback(self, request, response):
         self.block_markers = MarkerArray()
@@ -226,16 +239,13 @@ class Blocks(Node):
         # Train network using each image 
         for img in images:
             try:
-                # Convert image to ROS msg
                 rgb_image = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 ros_msg = self.bridge.cv2_to_imgmsg(rgb_image, encoding='rgb8')
                 
-                # Create training request
                 req = SortNet.Request()
                 req.image = ros_msg
                 req.label = label
                 
-                # Call training service with timeout
                 future = self.train_sorting_client.call_async(req)
                 try:
                     await rclpy.task.Future.wait_for(future, timeout=5.0)

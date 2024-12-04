@@ -40,9 +40,10 @@ public:
   : Node("manipulate_blocks")
   {
     declare_parameter("rate", 10.);
+    declare_parameter("scan_position_x", 0.5);
     loop_rate = get_parameter("rate").as_double();
+    scan_position_x = get_parameter("scan_position_x").as_double();
         
-    // Create the callback groups
     markers_callback_group_ = this->create_callback_group(
         rclcpp::CallbackGroupType::Reentrant);
     prediction_callback_group_ = this->create_callback_group(
@@ -56,7 +57,8 @@ public:
       std::bind(&ManipulateBlocks::handle_accepted, this, std::placeholders::_1)
     );
 
-    pretrain_franka_srv = this->create_service<std_srvs::srv::Empty>("pretrain_franka",
+    pretrain_franka_srv = this->create_service<std_srvs::srv::Empty>(
+            "pretrain_franka",
             std::bind(&ManipulateBlocks::pretrain_franka_callback, this, std::placeholders::_1, std::placeholders::_2));
 
     scan_overhead_cli = this->create_client<franka_hri_interfaces::srv::UpdateMarkers>("scan_overhead");
@@ -67,6 +69,9 @@ public:
     );
 
     block_pub = this->create_publisher<visualization_msgs::msg::MarkerArray>("blocks", 10);
+
+    block_placement_pub = this->create_publisher<franka_hri_interfaces::msg::BlockPlacementInfo>(
+        "block_placement_info", 10);  
 
     block_markers_sub = this->create_subscription<visualization_msgs::msg::MarkerArray>(
         "blocks", 10, std::bind(&ManipulateBlocks::marker_array_callback, this, std::placeholders::_1));
@@ -84,18 +89,22 @@ public:
         prediction_callback_group_
     );
 
-    pretrain_network_client = create_client<std_srvs::srv::Empty>("pretrain_network");
-
-    // Home joint positions
-    home_joint_positions = {0.0, -0.132, 0.002, -2.244, 0.004, 2.111, 0.785};
-
-    // Create clients for gesture network services
-    train_gesture_client = create_client<franka_hri_interfaces::srv::GestNet>("train_gesture");
-    get_gesture_prediction_client = this->create_client<franka_hri_interfaces::srv::GestNet>(
-        "get_gesture_prediction",
+    // Complex gesture clients
+    get_complex_gesture_prediction_client = this->create_client<franka_hri_interfaces::srv::GestNet>(
+        "get_complex_gesture_prediction",
         rmw_qos_profile_services_default,
         prediction_callback_group_
     );
+
+    train_complex_gesture_client = this->create_client<franka_hri_interfaces::srv::GestNet>(
+        "train_complex_gesture",
+        rmw_qos_profile_services_default,
+        prediction_callback_group_
+    );
+
+    pretrain_network_client = create_client<std_srvs::srv::Empty>("pretrain_network");
+
+    home_joint_positions = {0.0, -0.132, 0.002, -2.244, 0.004, 2.111, 0.785};
 
     // Add hands_detected subscriber
     hands_detected_sub = this->create_subscription<std_msgs::msg::Bool>(
@@ -112,7 +121,8 @@ public:
 
     block_markers = visualization_msgs::msg::MarkerArray();
 
-    pile_0_start.position.x = 0.5;
+    // Initialize pile positions for 4 categories
+    pile_0_start.position.x = scan_position_x - 0.2;
     pile_0_start.position.y = -0.4;
     pile_0_start.position.z = 0.0;
     pile_0_start.orientation.x = 1.0;
@@ -121,7 +131,13 @@ public:
     pile_0_start.orientation.w = 0.0;
 
     pile_1_start = pile_0_start;
-    pile_1_start.position.y = -pile_0_start.position.y;
+    pile_1_start.position.y = 0.4;
+
+    pile_2_start = pile_0_start;
+    pile_2_start.position.x = scan_position_x + 0.2;
+
+    pile_3_start = pile_2_start;
+    pile_3_start.position.y = 0.4;
 
     human_sort_input = -1;
   }
@@ -171,9 +187,10 @@ public:
 
 private:
   double loop_rate;
+  double scan_position_x;
   visualization_msgs::msg::MarkerArray block_markers;
-  geometry_msgs::msg::Pose pile_0_start, pile_1_start;
-  std::vector<int> pile_0_index, pile_1_index, sorted_index;
+  geometry_msgs::msg::Pose pile_0_start, pile_1_start, pile_2_start, pile_3_start;
+  std::vector<int> pile_0_index, pile_1_index, pile_2_index, pile_3_index, sorted_index;
   std::vector<double> home_joint_positions;
   int human_sort_input;
   bool hands_detected;
@@ -199,6 +216,7 @@ private:
   rclcpp::Client<franka_hri_interfaces::srv::GestNet>::SharedPtr train_gesture_client;
   rclcpp::Client<franka_hri_interfaces::srv::GestNet>::SharedPtr get_gesture_prediction_client;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr hands_detected_sub;
+  rclcpp::Publisher<franka_hri_interfaces::msg::BlockPlacementInfo>::SharedPtr block_placement_pub;
   std::shared_ptr<tf2_ros::Buffer> tfBuffer;
   std::shared_ptr<tf2_ros::TransformListener> tfListener;
   std::shared_ptr<moveit::core::RobotModel> kinematic_model;
@@ -207,13 +225,12 @@ private:
   void pretrain_franka_callback(const std::shared_ptr<std_srvs::srv::Empty::Request> request,
                         std::shared_ptr<std_srvs::srv::Empty::Response> response)
   {
-    // Start in ready position 
     move_to_joints(home_joint_positions);
 
     auto overhead_scan_pose = geometry_msgs::msg::PoseStamped();
     overhead_scan_pose.header.stamp = this->get_clock()->now();
     overhead_scan_pose.header.frame_id = "world";
-    overhead_scan_pose.pose.position.x = 0.5;
+    overhead_scan_pose.pose.position.x = scan_position_x;
     overhead_scan_pose.pose.position.y = 0.0;
     overhead_scan_pose.pose.position.z = 0.3;
     overhead_scan_pose.pose.orientation.x = 1.0;
@@ -237,13 +254,12 @@ private:
 
   void sort_blocks(const std::shared_ptr<rclcpp_action::ServerGoalHandle<franka_hri_interfaces::action::EmptyAction>> goal_handle)
   {
-      // Start in ready position 
       move_to_joints(home_joint_positions);
 
       auto overhead_scan_pose = geometry_msgs::msg::PoseStamped();
       overhead_scan_pose.header.stamp = this->get_clock()->now();
       overhead_scan_pose.header.frame_id = "world";
-      overhead_scan_pose.pose.position.x = 0.5;
+      overhead_scan_pose.pose.position.x = scan_position_x;
       overhead_scan_pose.pose.position.y = 0.0;
       overhead_scan_pose.pose.position.z = 0.3;
       overhead_scan_pose.pose.orientation.x = 1.0;
@@ -292,172 +308,287 @@ private:
           return;
       }
 
-      for (std::vector<visualization_msgs::msg::Marker>::size_type i = 0; i < (block_markers.markers.size()); i++) {
-        auto it = std::find(sorted_index.begin(), sorted_index.end(), i);
-        bool sorted = false;
+    for (std::vector<visualization_msgs::msg::Marker>::size_type i = 0; i < (block_markers.markers.size()); i++) {
+        if (std::find(sorted_index.begin(), sorted_index.end(), i) == sorted_index.end()) {
+            scan_block(i, true);
+            grab_block(i);
 
-        if (it != sorted_index.end()) {
-            sorted = true;
-        }
-
-        if (!sorted) { 
-          bool update_scale = true;
-          scan_block(i, update_scale);
-          grab_block(i);
-
-          // Get initial sorting prediction
-          double sort_pred = get_network_prediction(i);
-          RCLCPP_INFO(this->get_logger(), "Sort prediction: %f", sort_pred);
-          
-          // Determine initial stack based on sorting prediction
-          int predicted_stack = (sort_pred >= 0.5) ? 1 : 0;
-          auto wait_pose = overhead_scan_pose;
-          wait_pose.pose.position.y = (predicted_stack == 1) ? 0.2 : -0.2;
-          
-          // Move to position for gesture recognition
-          vel_factor = 0.6;
-          move_to_pose(wait_pose, planning_time, vel_factor, accel_factor);
-
-          // Brief pause, then get gesture prediction
-          std::this_thread::sleep_for(std::chrono::milliseconds(800));
-          double gesture_pred = get_gesture_prediction();
-          RCLCPP_INFO(this->get_logger(), "Gesture prediction: %f", gesture_pred);
-          
-          // Determine final stack based on gesture
-          int final_stack = predicted_stack;
-          if (gesture_pred < 0.5) {
-              final_stack = (predicted_stack == 1) ? 0 : 1;
-              RCLCPP_INFO(this->get_logger(), "Gesture indicates opposite stack");
-          }
-
-          // Place block in chosen stack
-          place_in_stack(i, final_stack);
-          
-          // Start monitoring for human intervention
-          waiting_for_human = true;
-          auto start_time = std::chrono::steady_clock::now();
-          bool human_moved_block = false;
-          int timeout_seconds = 5;
-          
-          RCLCPP_INFO(this->get_logger(), "Waiting for potential human intervention...");
-          
-          while (waiting_for_human) {
-            if (hands_detected) {
-              RCLCPP_INFO(this->get_logger(), "Hands detected - waiting for human to finish moving block");
-              human_moved_block = true;
-              
-              // Reset timeout when hands are detected
-              start_time = std::chrono::steady_clock::now();
-              
-              // Wait for hands to be removed
-              while (hands_detected) {
+            double sort_pred = get_network_prediction(i);
+            RCLCPP_INFO(this->get_logger(), "Sort prediction: %f", sort_pred);
+            
+            const double CONFIDENCE_THRESHOLD = 0.8;
+            int predicted_category = static_cast<int>(sort_pred);
+            bool high_confidence = (sort_pred - predicted_category) > CONFIDENCE_THRESHOLD;
+            int final_category;
+            double simple_gesture_pred = -1;  // Track if simple gesture was used
+            double complex_gesture_pred = -1;  // Track if complex gesture was used
+            
+            if (high_confidence) {
+                // Move to predicted pile position
+                auto wait_pose = get_pile_pose(predicted_category);
+                wait_pose.pose.position.z += 0.2;
+                move_to_pose(wait_pose, planning_time, vel_factor, accel_factor);
+                
+                // Get binary gesture confirmation
+                std::this_thread::sleep_for(std::chrono::milliseconds(800));
+                simple_gesture_pred = get_gesture_prediction();
+                
+                if (simple_gesture_pred >= 0.5) {
+                    final_category = predicted_category;
+                } else {
+                    // Move to center for complex gesture
+                    auto center_pose = overhead_scan_pose;
+                    center_pose.pose.position.z = 0.3;
+                    move_to_pose(center_pose, planning_time, vel_factor, accel_factor);
+                    
+                    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+                    complex_gesture_pred = get_complex_gesture_prediction();
+                    final_category = static_cast<int>(complex_gesture_pred);
+                }
+            } else {
+                // Low confidence - get complex gesture input immediately
+                auto center_pose = overhead_scan_pose;
+                center_pose.pose.position.z = 0.3;
+                move_to_pose(center_pose, planning_time, vel_factor, accel_factor);
+                
+                std::this_thread::sleep_for(std::chrono::milliseconds(800));
+                complex_gesture_pred = get_complex_gesture_prediction();
+                final_category = static_cast<int>(complex_gesture_pred);
+            }
+            
+            place_in_stack(i, final_category);
+            
+            // Monitor for human intervention
+            waiting_for_human = true;
+            auto start_time = std::chrono::steady_clock::now();
+            bool human_moved_block = false;
+            int timeout_seconds = 5;
+            
+            while (waiting_for_human) {
+                if (hands_detected) {
+                    human_moved_block = true;
+                    start_time = std::chrono::steady_clock::now();
+                    
+                    while (hands_detected) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    }
+                    break;
+                }
+                
+                auto current_time = std::chrono::steady_clock::now();
+                auto elapsed_time = std::chrono::duration_cast<std::chrono::seconds>(current_time - start_time);
+                if (elapsed_time.count() >= timeout_seconds) {
+                    waiting_for_human = false;
+                    break;
+                }
+                
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
-              }
-              break;
+            }
+
+            // Train networks based on actual results
+            if (simple_gesture_pred != -1) {
+                // Simple gesture was used - train it with whether its prediction matched the final outcome
+                bool was_prediction_correct = (simple_gesture_pred >= 0.5) == (final_category == predicted_category);
+                train_gesture_network(was_prediction_correct);
             }
             
-            // Check timeout
-            auto current_time = std::chrono::steady_clock::now();
-            auto elapsed_time = std::chrono::duration_cast<std::chrono::seconds>(current_time - start_time);
-            if (elapsed_time.count() >= timeout_seconds) {
-              RCLCPP_INFO(this->get_logger(), "Timeout reached - no human intervention detected");
-              waiting_for_human = false;
-              break;
+            if (complex_gesture_pred != -1) {
+                // Complex gesture was used - train it with the actual final category
+                train_complex_gesture_network(final_category);
             }
-            
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-          }
-          
-          if (human_moved_block) {
-              RCLCPP_INFO(this->get_logger(), "Human moved block - updating tracking");
-              
-              // Update stack tracking - remove from original stack and add to opposite
-              if (final_stack == 0) {
-                  // Remove from stack 0's tracking
-                  pile_0_index.pop_back();
-                  // Add to stack 1's tracking
-                  pile_1_index.push_back(i);
-                  
-                  // Remove the old collision object
-                  std::string id_string = std::to_string(i);
-                  auto block_id = std_msgs::msg::String();
-                  block_id.data = id_string;
-                  remove_collision_box(block_id);
-                  
-                  // Update marker position
-                  auto marker = block_markers.markers[i];
-                  marker.pose = pile_1_start;
-                  marker.pose.position.z = (pile_1_index.size() > 1) ? 
-                      block_markers.markers[pile_1_index[pile_1_index.size()-2]].pose.position.z + marker.scale.z : 
-                      pile_1_start.position.z + (marker.scale.z / 2);
-                  
-                  // Update markers
-                  auto request = std::make_shared<franka_hri_interfaces::srv::UpdateMarkers::Request>();
-                  marker.action = 0;
-                  request->input_markers.markers.push_back(marker);
-                  std::vector<int> update = {i};
-                  request->markers_to_update = update;
-                  
-                  auto future = update_markers_cli->async_send_request(request);
-                  auto result = future.get();
-                  block_markers = result->output_markers;
-                  
-                  // Create new collision object at updated position
-                  create_collision_box(marker.pose, marker.scale, block_id);
-                  
-                  // Train networks with corrected labels
-                  train_network(i, 1);  // Train sorting network
-                  train_gesture_network(final_stack != predicted_stack);  // Train gesture network
-                  
-              } else {
-                  // Remove from stack 1's tracking
-                  pile_1_index.pop_back();
-                  // Add to stack 0's tracking
-                  pile_0_index.push_back(i);
-                  
-                  // First remove the old collision object
-                  std::string id_string = std::to_string(i);
-                  auto block_id = std_msgs::msg::String();
-                  block_id.data = id_string;
-                  remove_collision_box(block_id);
-                  
-                  // Update marker position
-                  auto marker = block_markers.markers[i];
-                  marker.pose = pile_0_start;
-                  marker.pose.position.z = (pile_0_index.size() > 1) ? 
-                      block_markers.markers[pile_0_index[pile_0_index.size()-2]].pose.position.z + marker.scale.z : 
-                      pile_0_start.position.z + (marker.scale.z / 2);
-                  
-                  // Update markers
-                  auto request = std::make_shared<franka_hri_interfaces::srv::UpdateMarkers::Request>();
-                  marker.action = 0;
-                  request->input_markers.markers.push_back(marker);
-                  std::vector<int> update = {i};
-                  request->markers_to_update = update;
-                  
-                  auto future = update_markers_cli->async_send_request(request);
-                  auto result = future.get();
-                  block_markers = result->output_markers;
-                  
-                  // Create new collision object at updated position
-                  create_collision_box(marker.pose, marker.scale, block_id);
-                  
-                  // Train networks with corrected labels
-                  train_network(i, 0);  // Train sorting network
-                  train_gesture_network(final_stack != predicted_stack);  // Train gesture network
-              }
-          }
 
-          sorted_index.push_back(i);
+            // Train sorting network with final category
+            train_network(i, final_category);
 
-          // Move to safe home position
-          move_to_joints(home_joint_positions);
+            // Update block tracking if needed
+            if (human_moved_block) {
+                update_block_position(i, final_category);
+            }
+
+            sorted_index.push_back(i);
+            move_to_joints(home_joint_positions);
         }
+    }
+    
+    move_to_pose(overhead_scan_pose, planning_time, vel_factor, accel_factor);
+}
+
+
+// helper function to publish placement info
+void publish_placement_info(int last_placed_category) {
+    auto msg = franka_hri_interfaces::msg::BlockPlacementInfo();
+    
+    // Set last block info
+    if (!block_markers.markers.empty()) {
+        std::vector<int>* last_pile_index;
+        switch(last_placed_category) {
+            case 0: last_pile_index = &pile_0_index; break;
+            case 1: last_pile_index = &pile_1_index; break;
+            case 2: last_pile_index = &pile_2_index; break;
+            case 3: last_pile_index = &pile_3_index; break;
+            default: return;
+        }
+        if (!last_pile_index->empty()) {
+            msg.last_block_pose = block_markers.markers[last_pile_index->back()].pose;
+            msg.last_block_category = last_placed_category;
+        }
+    }
+
+    // Calculate next positions for each category
+    msg.next_positions.resize(4);
+    
+    // For each category
+    for (int cat = 0; cat < 4; cat++) {
+        geometry_msgs::msg::Pose next_pose;
+        std::vector<int>* pile_index;
+        geometry_msgs::msg::Pose* pile_start;
+        
+        switch(cat) {
+            case 0: 
+                pile_index = &pile_0_index;
+                pile_start = &pile_0_start;
+                break;
+            case 1: 
+                pile_index = &pile_1_index;
+                pile_start = &pile_1_start;
+                break;
+            case 2: 
+                pile_index = &pile_2_index;
+                pile_start = &pile_2_start;
+                break;
+            case 3: 
+                pile_index = &pile_3_index;
+                pile_start = &pile_3_start;
+                break;
+        }
+
+        next_pose = *pile_start;
+        
+        // If pile is full (3 blocks), adjust position for new pile
+        if (pile_index->size() >= 3) {
+            next_pose.position.x += -0.15;  // New pile position
+            next_pose.position.z = pile_start->position.z;  // Reset height for new pile
+        } else if (!pile_index->empty()) {
+            // Calculate height based on current top block
+            auto last_block = block_markers.markers[pile_index->back()];
+            next_pose.position.z = last_block.pose.position.z + (last_block.scale.z / 2);
+        }
+        
+        msg.next_positions[cat] = next_pose;
+    }
+
+    block_placement_pub->publish(msg);
+}
+
+geometry_msgs::msg::PoseStamped get_pile_pose(int category) {
+    geometry_msgs::msg::PoseStamped pose;
+    pose.header.stamp = this->get_clock()->now();
+    pose.header.frame_id = "world";
+    
+    // Get current pile position based on category
+    switch(category) {
+        case 0:
+            // Use current pile_0_start position
+            pose.pose = pile_0_start;
+            if (!pile_0_index.empty()) {
+                // Get height of current pile for z position
+                auto last_block = block_markers.markers[pile_0_index.back()];
+                pose.pose.position.z = last_block.pose.position.z + (last_block.scale.z / 2);
+            }
+            break;
+        case 1:
+            pose.pose = pile_1_start;
+            if (!pile_1_index.empty()) {
+                auto last_block = block_markers.markers[pile_1_index.back()];
+                pose.pose.position.z = last_block.pose.position.z + (last_block.scale.z / 2);
+            }
+            break;
+        case 2:
+            pose.pose = pile_2_start;
+            if (!pile_2_index.empty()) {
+                auto last_block = block_markers.markers[pile_2_index.back()];
+                pose.pose.position.z = last_block.pose.position.z + (last_block.scale.z / 2);
+            }
+            break;
+        case 3:
+            pose.pose = pile_3_start;
+            if (!pile_3_index.empty()) {
+                auto last_block = block_markers.markers[pile_3_index.back()];
+                pose.pose.position.z = last_block.pose.position.z + (last_block.scale.z / 2);
+            }
+            break;
+        default:
+            RCLCPP_ERROR(this->get_logger(), "Invalid category: %d", category);
+            pose.pose = pile_0_start;
+    }
+
+    // Add hovering height for waiting position
+    pose.pose.position.z += 0.15;  // Hover 15cm above where block will be placed
+    
+    return pose;
+}
+
+  // Training function for complex gesture network
+  void train_complex_gesture_network(int category) {
+      auto request = std::make_shared<franka_hri_interfaces::srv::GestNet::Request>();
+      request->label = category;
+
+      while (!train_complex_gesture_client->wait_for_service(std::chrono::seconds(1))) {
+          if (!rclcpp::ok()) {
+              RCLCPP_ERROR(this->get_logger(), "Complex gesture training service interrupted");
+              return;
+          }
+          RCLCPP_INFO(this->get_logger(), "Waiting for complex gesture training service");
+      }
+
+      // Send training request and handle response
+      auto response_received = std::make_shared<std::promise<franka_hri_interfaces::srv::GestNet::Response::SharedPtr>>();
+      auto future_result = response_received->get_future();
+
+      auto callback = [this, response_received](
+          rclcpp::Client<franka_hri_interfaces::srv::GestNet>::SharedFuture future) {
+          try {
+              auto result = future.get();
+              response_received->set_value(result);
+              RCLCPP_INFO(this->get_logger(), "Complex gesture network training complete");
+          } catch (const std::exception& e) {
+              RCLCPP_ERROR(this->get_logger(), "Error in complex gesture training callback: %s", e.what());
+          }
+      };
+
+      train_complex_gesture_client->async_send_request(request, callback);
+
+      if (future_result.wait_for(std::chrono::seconds(5)) == std::future_status::timeout) {
+          RCLCPP_ERROR(this->get_logger(), "Failed to train complex gesture network - timeout");
+          return;
+      }
+  }
+  
+  geometry_msgs::msg::PoseStamped get_pile_pose(int category) {
+      geometry_msgs::msg::PoseStamped pose;
+      pose.header.stamp = this->get_clock()->now();
+      pose.header.frame_id = "world";
+      
+      switch(category) {
+          case 0:
+              pose.pose = pile_0_start;  // Back left
+              break;
+          case 1:
+              pose.pose = pile_1_start;  // Front left
+              break;
+          case 2:
+              pose.pose = pile_2_start;  // Back right
+              break;
+          case 3:
+              pose.pose = pile_3_start;  // Front right
+              break;
+          default:
+              RCLCPP_ERROR(this->get_logger(), "Invalid category: %d", category);
+              pose.pose = pile_0_start;
       }
       
-      // Move back to overhead scan pose when finished
-      move_to_pose(overhead_scan_pose, planning_time, vel_factor, accel_factor);
-    }
+      return pose;
+  }
 
   void human_sorting_callback(const std_msgs::msg::Int8::SharedPtr msg)
   {
