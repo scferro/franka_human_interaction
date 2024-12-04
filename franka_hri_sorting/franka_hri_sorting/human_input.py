@@ -1,8 +1,11 @@
 """
-Human Input node with GUI for sorting decisions and model saving.
+Enhanced Human Input node with GUI for sorting decisions and model saving.
+Supports both binary (yes/no) and categorical (0-3) decisions.
 
 PUBLISHERS:
-    + human_sorting (std_msgs/Int8) - Sorting decision (0 for "No", 1 for "Yes")
+    + human_sorting (std_msgs/Int8) - Decision value:
+        - Binary mode: 0 (No) or 1 (Yes)
+        - Categorical mode: 0-3 representing different categories
 
 CLIENTS:
     + save_sorting_network (SaveModel) - Service to save sorting network
@@ -31,7 +34,7 @@ class HumanInputGUI(Node):
         
         # Initialize GUI
         self.root = tk.Tk()
-        self.root.title("Sorting Control Panel")
+        self.root.title("Human Input Control Panel")
         self.setup_gui()
         
         # Create a thread for ROS spinning
@@ -39,39 +42,90 @@ class HumanInputGUI(Node):
         self.ros_thread.start()
 
     def setup_gui(self):
-        """Set up the GUI elements."""
-        # Configure grid
+        """Set up the enhanced GUI with both binary and categorical inputs."""
+        # Configure grid for main window
         self.root.columnconfigure(0, weight=1)
         self.root.columnconfigure(1, weight=1)
         
-        # Style
+        # Style configuration
         style = ttk.Style()
         style.configure('Correct.TButton', background='green')
         style.configure('Wrong.TButton', background='red')
+        style.configure('Category.TButton', padding=10)
         
-        # Create frames
-        decision_frame = ttk.LabelFrame(self.root, text="Sorting Decision", padding="10")
-        decision_frame.grid(row=0, column=0, columnspan=2, padx=10, pady=5, sticky="nsew")
+        # Create main frames
+        binary_frame = ttk.LabelFrame(
+            self.root, 
+            text="Binary Decision (Yes/No)", 
+            padding="10"
+        )
+        binary_frame.grid(
+            row=0, column=0, columnspan=2, 
+            padx=10, pady=5, sticky="nsew"
+        )
         
-        save_frame = ttk.LabelFrame(self.root, text="Save Models", padding="10")
-        save_frame.grid(row=1, column=0, columnspan=2, padx=10, pady=5, sticky="nsew")
+        category_frame = ttk.LabelFrame(
+            self.root, 
+            text="Category Decision (0-3)", 
+            padding="10"
+        )
+        category_frame.grid(
+            row=1, column=0, columnspan=2, 
+            padx=10, pady=5, sticky="nsew"
+        )
         
-        # Sorting decision buttons
-        correct_btn = ttk.Button(
-            decision_frame, 
-            text="Correct (Yes)", 
+        save_frame = ttk.LabelFrame(
+            self.root, 
+            text="Save Models", 
+            padding="10"
+        )
+        save_frame.grid(
+            row=2, column=0, columnspan=2, 
+            padx=10, pady=5, sticky="nsew"
+        )
+
+        # Binary decision buttons
+        yes_btn = ttk.Button(
+            binary_frame, 
+            text="Yes (1)", 
             style='Correct.TButton',
-            command=lambda: self.publish_decision(1)
+            command=lambda: self.publish_decision(1, 'binary')
         )
-        correct_btn.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
+        yes_btn.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
         
-        wrong_btn = ttk.Button(
-            decision_frame, 
-            text="Wrong (No)", 
+        no_btn = ttk.Button(
+            binary_frame, 
+            text="No (0)", 
             style='Wrong.TButton',
-            command=lambda: self.publish_decision(0)
+            command=lambda: self.publish_decision(0, 'binary')
         )
-        wrong_btn.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        no_btn.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+
+        # Add explanatory label for binary mode
+        binary_label = ttk.Label(
+            binary_frame,
+            text="Use for simple yes/no decisions",
+            font=('TkDefaultFont', 9, 'italic')
+        )
+        binary_label.grid(row=1, column=0, columnspan=2, pady=(0, 5))
+
+        # Category decision buttons
+        for i in range(4):
+            btn = ttk.Button(
+                category_frame,
+                text=f"Category {i}",
+                style='Category.TButton',
+                command=lambda x=i: self.publish_decision(x, 'category')
+            )
+            btn.grid(row=0, column=i, padx=5, pady=5, sticky="ew")
+
+        # Add explanatory label for category mode
+        category_label = ttk.Label(
+            category_frame,
+            text="Use for multi-category decisions",
+            font=('TkDefaultFont', 9, 'italic')
+        )
+        category_label.grid(row=1, column=0, columnspan=4, pady=(0, 5))
         
         # Save model buttons
         save_sorting_btn = ttk.Button(
@@ -88,24 +142,41 @@ class HumanInputGUI(Node):
         )
         save_gesture_btn.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
         
-        # Status label
-        self.status_label = ttk.Label(self.root, text="Ready")
-        self.status_label.grid(row=2, column=0, columnspan=2, padx=5, pady=5)
+        # Status label with improved visibility
+        self.status_label = ttk.Label(
+            self.root, 
+            text="Ready",
+            font=('TkDefaultFont', 10, 'bold'),
+            background='light gray',
+            padding=5
+        )
+        self.status_label.grid(
+            row=3, column=0, columnspan=2, 
+            padx=5, pady=5, sticky="ew"
+        )
 
-    def publish_decision(self, decision):
-        """Publish sorting decision."""
+    def publish_decision(self, decision, mode):
+        """Publish decision with appropriate feedback based on mode."""
         msg = Int8()
         msg.data = decision
         self.sorting_pub.publish(msg)
-        self.status_label.config(
-            text=f"Published: {'Correct' if decision == 1 else 'Wrong'}"
-        )
-        self.get_logger().debug(f'Published decision: {decision}')
+        
+        # Provide appropriate feedback based on mode
+        if mode == 'binary':
+            status_text = f"Published binary decision: {'Yes' if decision == 1 else 'No'} ({decision})"
+        else:
+            status_text = f"Published category decision: Category {decision}"
+            
+        self.status_label.config(text=status_text)
+        self.get_logger().info(status_text)
 
     def save_sorting_network(self):
         """Call service to save sorting network."""
         if not self.save_sorting_client.wait_for_service(timeout_sec=1.0):
-            messagebox.showerror("Error", "Save sorting network service not available")
+            messagebox.showerror(
+                "Error", 
+                "Save sorting network service not available"
+            )
             return
             
         request = SaveModel.Request()
@@ -116,7 +187,10 @@ class HumanInputGUI(Node):
     def save_gesture_network(self):
         """Call service to save gesture network."""
         if not self.save_gesture_client.wait_for_service(timeout_sec=1.0):
-            messagebox.showerror("Error", "Save gesture network service not available")
+            messagebox.showerror(
+                "Error", 
+                "Save gesture network service not available"
+            )
             return
             
         request = SaveModel.Request()

@@ -1,5 +1,6 @@
 # Request
-int32 label     # Label for training (ignored for prediction)
+int32 label              # Label for training
 ---
 # Response
-float32 prediction      # Network prediction
+float32 prediction       # Network prediction
+string prediction_id     # Unique ID for tracking prediction feedback

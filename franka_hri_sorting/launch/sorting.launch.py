@@ -1,5 +1,5 @@
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 from launch.substitutions import LaunchConfiguration, PythonExpression
@@ -12,48 +12,75 @@ def generate_launch_description():
     franka_hri_sorting_dir = get_package_share_directory('franka_hri_sorting')
     franka_moveit_config_dir = get_package_share_directory('franka_moveit_config')
 
-    # Define paths for model saving/loading
-    default_models_dir = os.path.join('/home/scferro/Documents/final_project/hri_models')
-    default_save_dir = default_models_dir
+    # Define all default directories
+    default_base_dir = '/home/scferro/Documents/final_project/hri_data'
+    default_models_dir = os.path.join(default_base_dir, 'models')
+    default_logs_dir = os.path.join(default_base_dir, 'logs')
+    default_training_images = os.path.join(default_base_dir, 'training_images')
     rviz_config_file = os.path.join(franka_hri_sorting_dir, 'config', 'sorting.rviz')
     
-    # Ensure directories exist
-    os.makedirs(default_models_dir, exist_ok=True)
-    os.makedirs(default_save_dir, exist_ok=True)
+    # Ensure all required directories exist
+    for directory in [default_models_dir, default_logs_dir, default_training_images]:
+        os.makedirs(directory, exist_ok=True)
 
-    # Mode selection argument
+    # System mode arguments
     mode_arg = DeclareLaunchArgument(
         'mode',
         default_value='robot',
         description='Launch mode: "robot" or "images"'
     )
 
-    # Training mode argument
     training_mode_arg = DeclareLaunchArgument(
         'training_mode',
         default_value='sorting_only',
         description='Training mode: "sorting_only", "gestures_only", or "both"'
     )
 
-    # Standard arguments
-    sorting_model_path_arg = DeclareLaunchArgument(
-        'sorting_model_path',
-        default_value='',
-        description='Path to pretrained sorting model'
+    gesture_network_type_arg = DeclareLaunchArgument(
+        'gesture_network_type',
+        default_value='binary',
+        description='Gesture network type: "binary" or "complex"'
     )
 
-    gesture_model_path_arg = DeclareLaunchArgument(
-        'gesture_model_path',
+    # Model path arguments
+    complex_sorting_model_path_arg = DeclareLaunchArgument(
+        'complex_sorting_model_path',
         default_value='',
-        description='Path to pretrained gesture model'
+        description='Path to complex sorting network model'
     )
 
+    binary_gesture_model_path_arg = DeclareLaunchArgument(
+        'binary_gesture_model_path',
+        default_value='',
+        description='Path to binary gesture network model'
+    )
+
+    complex_gesture_model_path_arg = DeclareLaunchArgument(
+        'complex_gesture_model_path',
+        default_value='',
+        description='Path to complex gesture network model'
+    )
+
+    # Directory arguments
     save_directory_arg = DeclareLaunchArgument(
         'save_directory',
-        default_value=str(default_save_dir),
+        default_value=str(default_models_dir),
         description='Directory to save trained models'
     )
 
+    log_directory_arg = DeclareLaunchArgument(
+        'log_directory',
+        default_value=str(default_logs_dir),
+        description='Directory to save network logs'
+    )
+
+    training_images_arg = DeclareLaunchArgument(
+        'training_images_path',
+        default_value=str(default_training_images),
+        description='Path to training images directory'
+    )
+
+    # Network configuration arguments
     buffer_size_arg = DeclareLaunchArgument(
         'buffer_size',
         default_value='25',
@@ -64,13 +91,6 @@ def generate_launch_description():
         'sequence_length',
         default_value='20',
         description='Length of gesture sequences'
-    )
-
-    # Training images directory argument
-    training_images_arg = DeclareLaunchArgument(
-        'training_images_path',
-        default_value="/home/scferro/Documents/final_project/training_images",
-        description='Path to training images directory'
     )
 
     # Define robot-mode nodes
@@ -99,28 +119,29 @@ def generate_launch_description():
         condition=IfCondition(PythonExpression(["'", LaunchConfiguration('mode'), "' == 'robot'"]))
     )
 
-    # Define shared nodes
-    human_input_node = Node(
-        package='franka_hri_sorting',
-        executable='human_input',
-        name='human_input'
-    )
-
+    # Network node with correctly named model paths
     network_node = Node(
         package='franka_hri_sorting',
         executable='network_node',
         name='network_node',
         parameters=[{
-            'sorting_model_path': LaunchConfiguration('sorting_model_path'),
-            'gesture_model_path': LaunchConfiguration('gesture_model_path'),
+            # Model paths with updated names
+            'complex_sorting_model_path': LaunchConfiguration('complex_sorting_model_path'),
+            'binary_gesture_model_path': LaunchConfiguration('binary_gesture_model_path'),
+            'complex_gesture_model_path': LaunchConfiguration('complex_gesture_model_path'),
+            
+            # Directories
             'save_directory': LaunchConfiguration('save_directory'),
+            'log_directory': LaunchConfiguration('log_directory'),
+            
+            # Network configuration
             'buffer_size': LaunchConfiguration('buffer_size'),
-            'sequence_length': LaunchConfiguration('sequence_length'),
+            'sequence_length': LaunchConfiguration('sequence_length')
         }],
         output='screen'
     )
 
-    # Define image-mode node
+    # Training node
     network_training_node = Node(
         package='franka_hri_sorting',
         executable='network_training',
@@ -128,6 +149,7 @@ def generate_launch_description():
         parameters=[{
             'training_images_path': LaunchConfiguration('training_images_path'),
             'training_mode': LaunchConfiguration('training_mode'),
+            'gesture_network_type': LaunchConfiguration('gesture_network_type'),
             'display_time': 2.0,
             'gesture_warning_time': 3.0,
             'prediction_timeout': 5.0
@@ -135,17 +157,40 @@ def generate_launch_description():
         condition=IfCondition(PythonExpression(["'", LaunchConfiguration('mode'), "' == 'images'"]))
     )
 
+    # Human input node
+    human_input_node = Node(
+        package='franka_hri_sorting',
+        executable='human_input',
+        name='human_input',
+        parameters=[{
+            # Configure input mode based on training settings
+            'training_mode': LaunchConfiguration('training_mode'),
+            'gesture_network_type': LaunchConfiguration('gesture_network_type'),
+            'display_time': 2.0
+        }]
+    )
+
     # Create and return launch description
     return LaunchDescription([
         # Launch arguments
         mode_arg,
         training_mode_arg,
-        sorting_model_path_arg,
-        gesture_model_path_arg,
+        gesture_network_type_arg,
+        
+        # Model paths with updated names
+        complex_sorting_model_path_arg,
+        binary_gesture_model_path_arg,
+        complex_gesture_model_path_arg,
+        
+        # Directories
         save_directory_arg,
+        log_directory_arg,
+        training_images_arg,
+        
+        # Configuration
         buffer_size_arg,
         sequence_length_arg,
-        training_images_arg,
+        
         # Nodes and includes
         rviz_launch,
         realsense_launch,

@@ -1,7 +1,8 @@
 # Request
-sensor_msgs/Image image  # Image for training/prediction
-int32 label             # Label for training (ignored for prediction)
+sensor_msgs/Image image    # Image for training/prediction
+int32 label               # Label for training (ignored for prediction)
 int32 index             # Index for working with indexed blocks
 ---
 # Response
-float32 prediction      # Network prediction
+float32 prediction        # Network prediction
+string prediction_id      # Unique ID for tracking prediction feedback

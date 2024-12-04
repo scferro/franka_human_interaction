@@ -12,12 +12,20 @@ from cv_bridge import CvBridge, CvBridgeError
 import time
 import threading
 
+class GestureNetworkType(enum.Enum):
+    """Enum for different gesture network types."""
+    BINARY = "binary"    # Simple binary gesture network
+    COMPLEX = "complex"  # Multi-class gesture network
+
 class TrainingMode(enum.Enum):
+    """Enum for different training modes."""
     SORTING_ONLY = "sorting_only"
     GESTURES_ONLY = "gestures_only" 
     BOTH = "both"
 
 class NetworkTrainingNode(Node):
+    """Node for training sorting and gesture networks."""
+    
     def __init__(self):
         super().__init__('network_training_node')
         self._init_parameters()
@@ -27,35 +35,56 @@ class NetworkTrainingNode(Node):
 
     def _init_parameters(self):
         """Initialize node parameters."""
+        # Training mode parameters
         self.declare_parameter('training_mode', 'sorting_only')
-        self.declare_parameter('training_images_path', '/home/scferro/Documents/final_project/training_images')
+        self.declare_parameter('gesture_network_type', 'binary')
+        self.declare_parameter('training_images_path', '/home/user/training_images')
         self.declare_parameter('display_time', 2.0)
         self.declare_parameter('gesture_warning_time', 3.0)
         self.declare_parameter('prediction_timeout', 5.0)
 
+        # Get parameter values
         self.training_mode = TrainingMode(self.get_parameter('training_mode').value)
+        self.gesture_network_type = GestureNetworkType(
+            self.get_parameter('gesture_network_type').value)
         self.training_path = self.get_parameter('training_images_path').value
         self.display_time = self.get_parameter('display_time').value
         self.gesture_warning_time = self.get_parameter('gesture_warning_time').value
         self.prediction_timeout = self.get_parameter('prediction_timeout').value
 
-        if not self.training_path and self.training_mode != TrainingMode.GESTURES_ONLY:
-            raise ValueError("Training images path parameter must be set for non-gesture-only modes")
+        # Validate modes and configurations
+        if self.training_mode == TrainingMode.BOTH:
+            self.gesture_network_type = GestureNetworkType.COMPLEX
+            self.get_logger().info("Forcing complex gesture network for combined training mode")
+        
+        if self.training_mode != TrainingMode.GESTURES_ONLY and not self.training_path:
+            raise ValueError("Training images path must be set for non-gesture-only modes")
 
     def _init_clients_and_publishers(self):
         """Initialize service clients and publishers."""
         self.bridge = CvBridge()
         
-        # Service clients
-        self.train_sorting_client = self.create_client(SortNet, 'train_sorting')
-        self.get_sorting_prediction_client = self.create_client(SortNet, 'get_sorting_prediction')
-        self.train_gesture_client = self.create_client(GestNet, 'train_gesture')
-        self.get_gesture_prediction_client = self.create_client(GestNet, 'get_gesture_prediction')
+        # Service clients for sorting network (always complex)
+        self.train_sorting_client = self.create_client(
+            SortNet, 'train_sorting')
+        self.get_sorting_prediction_client = self.create_client(
+            SortNet, 'get_sorting_prediction')
+        
+        # Service clients for gesture networks
+        if self.gesture_network_type == GestureNetworkType.BINARY:
+            self.train_gesture_client = self.create_client(
+                GestNet, 'train_gesture')
+            self.get_gesture_prediction_client = self.create_client(
+                GestNet, 'get_gesture_prediction')
+        else:
+            self.train_gesture_client = self.create_client(
+                GestNet, 'train_complex_gesture')
+            self.get_gesture_prediction_client = self.create_client(
+                GestNet, 'get_complex_gesture_prediction')
 
-        # Publishers
-        self.notification_pub = self.create_publisher(String, 'user_notifications', 10)
-
-        # Subscribers
+        # Publishers and subscribers
+        self.notification_pub = self.create_publisher(
+            String, 'user_notifications', 10)
         self.human_input_sub = self.create_subscription(
             Int8,
             'human_sorting',
@@ -70,6 +99,8 @@ class NetworkTrainingNode(Node):
         self.display_window_created = False
         self.waiting_for_input = False
         self.waiting_for_gesture = False
+        
+        # Prediction tracking
         self.current_sorting_prediction = None
         self.current_gesture_prediction = None
 
@@ -101,7 +132,7 @@ class NetworkTrainingNode(Node):
             time.sleep(0.01)
 
     def get_gesture_prediction(self) -> bool:
-        """Get prediction from gesture network."""
+        """Get prediction from appropriate gesture network."""
         request = GestNet.Request()
         
         try:
@@ -109,7 +140,6 @@ class NetworkTrainingNode(Node):
                 self.get_logger().warn('Gesture prediction service not available')
                 return False
 
-            # Notify user to prepare for gesture
             self.notify_user("Make your gesture now!")
             time.sleep(self.gesture_warning_time)
             self.notify_user("Getting gesture prediction...")
@@ -118,8 +148,17 @@ class NetworkTrainingNode(Node):
             rclpy.spin_until_future_complete(self, future)
             
             if future.result() is not None:
-                self.current_gesture_prediction = future.result().prediction
-                self.get_logger().info(f'Gesture prediction: {self.current_gesture_prediction}')
+                result = future.result()
+                
+                if self.gesture_network_type == GestureNetworkType.COMPLEX:
+                    # For complex network, store predicted class (0-3)
+                    self.current_gesture_prediction = int(result.prediction)
+                    self.get_logger().info(f'Gesture prediction: {self.current_gesture_prediction}')
+                else:
+                    # For binary network, store probability value
+                    self.current_gesture_prediction = result.prediction
+                    self.get_logger().info(
+                        f'Binary gesture prediction: {self.current_gesture_prediction:.2f}')
                 return True
             else:
                 self.get_logger().error('Failed to get gesture prediction')
@@ -130,7 +169,7 @@ class NetworkTrainingNode(Node):
             return False
 
     def get_sorting_prediction(self) -> bool:
-        """Get prediction from sorting network."""
+        """Get prediction from complex sorting network."""
         if self.current_ros_msg is None:
             return False
 
@@ -142,8 +181,8 @@ class NetworkTrainingNode(Node):
             rclpy.spin_until_future_complete(self, future, timeout_sec=self.prediction_timeout)
             
             if future.result() is not None:
-                raw_prediction = future.result().prediction
-                self.current_sorting_prediction = 1 if raw_prediction > 0.5 else 0
+                result = future.result()
+                self.current_sorting_prediction = int(result.prediction)
                 self.get_logger().info(f'Sorting prediction: {self.current_sorting_prediction}')
                 return True
             else:
@@ -160,72 +199,75 @@ class NetworkTrainingNode(Node):
             return
 
         key = msg.data
-        if self.training_mode == TrainingMode.SORTING_ONLY:
-            if self.current_sorting_prediction is not None:
-                self._handle_sorting_feedback(key)
         
-        elif self.training_mode == TrainingMode.GESTURES_ONLY:
-            if self.current_gesture_prediction is not None:
-                self._handle_gesture_feedback(key)
-        
-        elif self.training_mode == TrainingMode.BOTH:
-            if self.current_sorting_prediction is not None:
-                # For both modes, the gesture network trains on the final sorting decision
-                label = self.current_sorting_prediction if key == 1 else (1 - self.current_sorting_prediction)
-                self._handle_sorting_feedback(key)
-                self.train_gesture_network(label)
+        # Validate input based on mode
+        if self.training_mode == TrainingMode.GESTURES_ONLY:
+            if self.gesture_network_type == GestureNetworkType.BINARY:
+                # For binary gesture training, only allow 0 or 1
+                if key not in [0, 1]:
+                    self.notify_user("Error: Binary gesture training only accepts 0 or 1 as input")
+                    return
+            else:
+                # For complex gesture training, allow 0-3
+                if not 0 <= key <= 3:
+                    self.notify_user("Error: Complex gesture training requires input between 0 and 3")
+                    return
+        else:
+            # For sorting and combined training, allow only 0-3
+            if not 0 <= key <= 3:
+                self.notify_user("Error: Input must be between 0 and 3")
+                return
 
-        # Only clear image if we're not in gesture-only mode
+        # Process valid input
+        if self.training_mode == TrainingMode.SORTING_ONLY:
+            self._train_sorting_network(key)
+        elif self.training_mode == TrainingMode.GESTURES_ONLY:
+            self._train_gesture_network(key)
+        elif self.training_mode == TrainingMode.BOTH:
+            self._train_both_networks(key)
+
+        # Clear image if not in gesture-only mode
         if self.training_mode != TrainingMode.GESTURES_ONLY:
             self.current_image = None
+        
         self.waiting_for_input = False
 
-    def _handle_sorting_feedback(self, key):
-        """Handle feedback for sorting network."""
-        if key == 1:  # Correct prediction
-            self.train_sorting_network(self.current_sorting_prediction)
-        elif key == 0:  # Incorrect prediction
-            self.train_sorting_network(1 - self.current_sorting_prediction)
+    def _train_sorting_network(self, label):
+        """Train the sorting network with new label."""
+        if self.current_ros_msg is None:
+            return
 
-    def _handle_gesture_feedback(self, key):
-        """Handle feedback for gesture network."""
-        binary_prediction = 1 if self.current_gesture_prediction > 0.5 else 0
-        if key == 1:  # Correct prediction
-            self.train_gesture_network(binary_prediction)
-        elif key == 0:  # Incorrect prediction
-            self.train_gesture_network(1 - binary_prediction)
+        request = SortNet.Request()
+        request.image = self.current_ros_msg
+        request.label = label
 
-    def train_gesture_network(self, label):
-        """Train the gesture network."""
+        try:
+            future = self.train_sorting_client.call_async(request)
+            rclpy.spin_until_future_complete(self, future)
+            self.get_logger().info(f"Trained sorting network with label {label}")
+        except Exception as e:
+            self.get_logger().error(f"Error training sorting network: {str(e)}")
+
+    def _train_gesture_network(self, label):
+        """Train the gesture network with new label."""
         request = GestNet.Request()
         request.label = label
         
         try:
-            # No need to send sequence data - the network node will use its current sequence
             future = self.train_gesture_client.call_async(request)
-            self.get_logger().info(f'Training gesture network with label {label}')
-            
+            rclpy.spin_until_future_complete(self, future)
+            self.get_logger().info(f"Trained gesture network with label {label}")
         except Exception as e:
-            self.get_logger().error(f'Failed to train gesture network: {str(e)}')
+            self.get_logger().error(f"Error training gesture network: {str(e)}")
 
-    def train_sorting_network(self, label):
-        """Train the sorting network."""
-        if self.current_ros_msg is None:
-            return
-            
-        request = SortNet.Request()
-        request.image = self.current_ros_msg
-        request.label = label
-        
-        try:
-            future = self.train_sorting_client.call_async(request)
-            self.get_logger().info(f'Training sorting network with label {label}')
-        except Exception as e:
-            self.get_logger().error(f'Failed to train sorting network: {str(e)}')
+    def _train_both_networks(self, label):
+        """Train both networks with the same label."""
+        self._train_sorting_network(label)
+        self._train_gesture_network(label)
 
     def process_iteration(self):
         """Process one training iteration based on current mode."""
-        # Only load and prepare image for non-gesture-only modes
+        # Load image for non-gesture-only modes
         if self.training_mode != TrainingMode.GESTURES_ONLY:
             image = self.load_random_image()
             if image is None:
@@ -243,20 +285,38 @@ class NetworkTrainingNode(Node):
         if self.training_mode == TrainingMode.SORTING_ONLY:
             if self.get_sorting_prediction():
                 self.waiting_for_input = True
-                self.notify_user(f'Is the sorting prediction {self.current_sorting_prediction} correct? (Y/N)')
+                self.notify_user(
+                    f"Predicted class: {self.current_sorting_prediction}\n"
+                    f"Enter correct class (0-3)"
+                )
 
         elif self.training_mode == TrainingMode.GESTURES_ONLY:
             if self.get_gesture_prediction():
                 self.waiting_for_input = True
-                prediction = 1 if self.current_gesture_prediction > 0.5 else 0
-                self.notify_user(f'Is the gesture prediction {prediction} correct? (Y/N)')
+                if self.gesture_network_type == GestureNetworkType.COMPLEX:
+                    self.notify_user(
+                        f"Predicted class: {self.current_gesture_prediction}\n"
+                        f"Enter correct class (0-3)"
+                    )
+                else:
+                    # Show binary prediction
+                    pred_text = "1" if self.current_gesture_prediction >= 0.5 else "0"
+                    prob_text = f"{self.current_gesture_prediction:.2f}"
+                    self.notify_user(
+                        f'Binary prediction: {pred_text} (confidence: {prob_text})\n'
+                        f'Enter 1 for correct or 0 for incorrect'
+                    )
 
         elif self.training_mode == TrainingMode.BOTH:
-            if self.get_gesture_prediction() and self.get_sorting_prediction():
+            if self.get_sorting_prediction() and self.get_gesture_prediction():
                 self.waiting_for_input = True
-                self.notify_user(f'Is the sorting prediction {self.current_sorting_prediction} correct? (Y/N)')
+                self.notify_user(
+                    f"Sorting prediction: {self.current_sorting_prediction}\n"
+                    f"Gesture prediction: {self.current_gesture_prediction}\n"
+                    f"Enter correct class (0-3)"
+                )
 
-        # Only sleep for display in non-gesture-only modes
+        # Display delay for non-gesture-only modes
         if self.training_mode != TrainingMode.GESTURES_ONLY:
             time.sleep(self.display_time)
 
@@ -264,7 +324,8 @@ class NetworkTrainingNode(Node):
         """Load a random image from the training folder."""
         try:
             files = os.listdir(self.training_path)
-            image_files = [f for f in files if f.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp'))]
+            image_files = [f for f in files if f.lower().endswith(
+                ('.png', '.jpg', '.jpeg', '.gif', '.bmp'))]
             
             if not image_files:
                 self.get_logger().error("No image files found in the specified folder")
@@ -286,7 +347,10 @@ class NetworkTrainingNode(Node):
 
     def run_training(self):
         """Main training loop."""
-        self.get_logger().info(f'Starting training in {self.training_mode.value} mode')
+        mode_desc = f'Training Mode: {self.training_mode.value}'
+        if self.training_mode == TrainingMode.GESTURES_ONLY:
+            mode_desc += f' ({self.gesture_network_type.value} network)'
+        self.get_logger().info(f'Starting training - {mode_desc}')
         
         while rclpy.ok():
             if self.waiting_for_input:
@@ -296,16 +360,20 @@ class NetworkTrainingNode(Node):
             self.process_iteration()
 
 def main(args=None):
+    """Main function to initialize and run the node."""
     rclpy.init(args=args)
-    node = NetworkTrainingNode()
     try:
+        node = NetworkTrainingNode()
         node.run_training()
     except KeyboardInterrupt:
         pass
+    except Exception as e:
+        print(f"Error running training node: {str(e)}")
     finally:
-        if node.training_mode != TrainingMode.GESTURES_ONLY and node.display_window_created:
+        if hasattr(node, 'display_window_created') and node.display_window_created:
             cv2.destroyAllWindows()
-        node.destroy_node()
+        if hasattr(node, 'destroy_node'):
+            node.destroy_node()
         rclpy.shutdown()
 
 if __name__ == '__main__':
