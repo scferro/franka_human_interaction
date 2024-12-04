@@ -196,27 +196,28 @@ class NetworkTrainingNode(Node):
     def human_input_callback(self, msg):
         """Handle human input based on current mode."""
         if not self.waiting_for_input:
+            self.get_logger().warn("Received input but not waiting for input")
             return
 
+        self.get_logger().info("Received human input")
         key = msg.data
         
         # Validate input based on mode
         if self.training_mode == TrainingMode.GESTURES_ONLY:
             if self.gesture_network_type == GestureNetworkType.BINARY:
-                # For binary gesture training, only allow 0 or 1
                 if key not in [0, 1]:
                     self.notify_user("Error: Binary gesture training only accepts 0 or 1 as input")
                     return
             else:
-                # For complex gesture training, allow 0-3
                 if not 0 <= key <= 3:
                     self.notify_user("Error: Complex gesture training requires input between 0 and 3")
                     return
         else:
-            # For sorting and combined training, allow only 0-3
             if not 0 <= key <= 3:
                 self.notify_user("Error: Input must be between 0 and 3")
                 return
+
+        self.get_logger().info(f"Processing valid input: {key}")
 
         # Process valid input
         if self.training_mode == TrainingMode.SORTING_ONLY:
@@ -228,13 +229,17 @@ class NetworkTrainingNode(Node):
 
         # Clear image if not in gesture-only mode
         if self.training_mode != TrainingMode.GESTURES_ONLY:
+            self.get_logger().info("Clearing current image")
             self.current_image = None
         
+        self.get_logger().info("Resetting waiting_for_input flag")
         self.waiting_for_input = False
+        self.get_logger().info("Human input processing complete")
 
     def _train_sorting_network(self, label):
         """Train the sorting network with new label."""
         if self.current_ros_msg is None:
+            self.get_logger().error("No image available for training")
             return
 
         request = SortNet.Request()
@@ -242,9 +247,26 @@ class NetworkTrainingNode(Node):
         request.label = label
 
         try:
+            self.get_logger().info(f"Sending training request with label {label}")
             future = self.train_sorting_client.call_async(request)
-            rclpy.spin_until_future_complete(self, future)
-            self.get_logger().info(f"Trained sorting network with label {label}")
+            
+            # Wait for the training response
+            rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
+            
+            if future.result() is not None:
+                self.get_logger().info("Training request completed successfully")
+                
+                # Clear state after successful training
+                self.get_logger().info("Clearing current image")
+                self.current_image = None
+                
+                self.get_logger().info("Resetting waiting_for_input flag")
+                self.waiting_for_input = False
+                
+                self.get_logger().info("Ready for next iteration")
+            else:
+                self.get_logger().error("Training request failed")
+                
         except Exception as e:
             self.get_logger().error(f"Error training sorting network: {str(e)}")
 
@@ -267,30 +289,40 @@ class NetworkTrainingNode(Node):
 
     def process_iteration(self):
         """Process one training iteration based on current mode."""
+        self.get_logger().info("Starting new iteration")
+        
         # Load image for non-gesture-only modes
         if self.training_mode != TrainingMode.GESTURES_ONLY:
+            self.get_logger().info("Loading random image")
             image = self.load_random_image()
             if image is None:
+                self.get_logger().error("Failed to load random image")
                 return
 
             self.current_image = image
             try:
                 rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                 self.current_ros_msg = self.bridge.cv2_to_imgmsg(rgb_image, encoding='rgb8')
+                self.get_logger().info("Successfully loaded and converted new image")
             except CvBridgeError as e:
                 self.get_logger().error(f'CV Bridge error: {str(e)}')
                 return
 
         # Handle different modes
         if self.training_mode == TrainingMode.SORTING_ONLY:
+            self.get_logger().info("Getting sorting prediction")
             if self.get_sorting_prediction():
                 self.waiting_for_input = True
                 self.notify_user(
                     f"Predicted class: {self.current_sorting_prediction}\n"
                     f"Enter correct class (0-3)"
                 )
+                self.get_logger().info("Waiting for human input")
+            else:
+                self.get_logger().error("Failed to get sorting prediction")
 
         elif self.training_mode == TrainingMode.GESTURES_ONLY:
+            self.get_logger().info("Processing gesture training iteration")
             if self.get_gesture_prediction():
                 self.waiting_for_input = True
                 if self.gesture_network_type == GestureNetworkType.COMPLEX:
@@ -299,15 +331,18 @@ class NetworkTrainingNode(Node):
                         f"Enter correct class (0-3)"
                     )
                 else:
-                    # Show binary prediction
-                    pred_text = "1" if self.current_gesture_prediction >= 0.5 else "0"
+                    pred_text = "Yes" if self.current_gesture_prediction >= 0.5 else "No"
                     prob_text = f"{self.current_gesture_prediction:.2f}"
                     self.notify_user(
                         f'Binary prediction: {pred_text} (confidence: {prob_text})\n'
                         f'Enter 1 for correct or 0 for incorrect'
                     )
+                self.get_logger().info("Waiting for human input")
+            else:
+                self.get_logger().error("Failed to get gesture prediction")
 
         elif self.training_mode == TrainingMode.BOTH:
+            self.get_logger().info("Processing combined training iteration")
             if self.get_sorting_prediction() and self.get_gesture_prediction():
                 self.waiting_for_input = True
                 self.notify_user(
@@ -315,6 +350,9 @@ class NetworkTrainingNode(Node):
                     f"Gesture prediction: {self.current_gesture_prediction}\n"
                     f"Enter correct class (0-3)"
                 )
+                self.get_logger().info("Waiting for human input")
+            else:
+                self.get_logger().error("Failed to get predictions")
 
         # Display delay for non-gesture-only modes
         if self.training_mode != TrainingMode.GESTURES_ONLY:
@@ -353,11 +391,19 @@ class NetworkTrainingNode(Node):
         self.get_logger().info(f'Starting training - {mode_desc}')
         
         while rclpy.ok():
-            if self.waiting_for_input:
-                rclpy.spin_once(self, timeout_sec=0.1)
-                continue
-            
-            self.process_iteration()
+            try:
+                if self.waiting_for_input:
+                    self.get_logger().debug("Waiting for input - spinning once")
+                    rclpy.spin_once(self, timeout_sec=0.1)
+                else:
+                    self.get_logger().info("Ready for next iteration")
+                    self.process_iteration()
+            except Exception as e:
+                self.get_logger().error(f"Error in training loop: {str(e)}")
+                break
+
+        self.get_logger().info("Training loop ended")
+
 
 def main(args=None):
     """Main function to initialize and run the node."""
