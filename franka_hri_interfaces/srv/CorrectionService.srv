@@ -1,0 +1,7 @@
+# Request
+int32 old_label     # Previous incorrect label
+int32 new_label     # Corrected label
+---
+# Response
+bool success        # Whether correction was successful
+string message      # Status/error message

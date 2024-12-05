@@ -1,0 +1,15 @@
+apriltag_d435:
+  ros__parameters:
+    image_transport: raw
+    family: Standard41h12
+    size: 0.108
+    max_hamming: 0
+    detector:
+      threads: 2
+      decimate: 2.0
+      blur: 0.0
+      sharpening: 0.25
+    tag:
+      ids: [7]
+      frames: [d435_tag]
+      sizes: [0.108]
