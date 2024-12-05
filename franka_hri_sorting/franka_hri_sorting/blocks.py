@@ -111,8 +111,6 @@ class Blocks(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
         self.tf_buffer = Buffer()
         self.listener = TransformListener(self.tf_buffer, self)
-
-        # Publish static transform for camera once at startup
         self.tf_static_broadcaster = StaticTransformBroadcaster(self)
 
         # Create timer
@@ -158,7 +156,6 @@ class Blocks(Node):
         self.cx = None
         self.cy = None
         self.table_z_offset = 0.02
-        self.make_static_transforms()
 
         self.get_logger().info("Blocks node started successfully!")
 
@@ -591,7 +588,7 @@ class Blocks(Node):
             # Create PointStamped object for transformation
             point_stamped = PointStamped()
             point_stamped.header.stamp = self.get_clock().now().to_msg()
-            point_stamped.header.frame_id = 'd405_link'
+            point_stamped.header.frame_id = 'd405_color_optical_frame'
             point_stamped.point.x = center_3d[0]
             point_stamped.point.y = center_3d[1]
             point_stamped.point.z = center_3d[2]
@@ -777,42 +774,6 @@ class Blocks(Node):
         except CvBridgeError as e:
             self.get_logger().info(f"Error converting OpenCV image to ROS2 message: {e}")
             return None
-
-    def make_static_transforms(self):
-        t_cam = TransformStamped()
-
-        t_cam.header.stamp = self.get_clock().now().to_msg()
-        t_cam.header.frame_id = 'panda_hand'
-        t_cam.child_frame_id = 'd405_link'
-
-        t_cam.transform.translation.x = 0.07
-        t_cam.transform.translation.y = 0.0
-        t_cam.transform.translation.z = 0.055
-
-        t_cam.transform.rotation.x = 0.0
-        t_cam.transform.rotation.y = 0.0
-        t_cam.transform.rotation.z = 0.7071068
-        t_cam.transform.rotation.w = 0.7071068
-
-        self.tf_static_broadcaster.sendTransform(t_cam)
-
-        t_world = TransformStamped()
-
-        t_world.header.stamp = self.get_clock().now().to_msg()
-        t_world.header.frame_id = 'world'
-        t_world.child_frame_id = 'panda_link0'
-
-        t_world.transform.translation.x = 0.0
-        t_world.transform.translation.y = 0.0
-        t_world.transform.translation.z = -self.table_z_offset
-
-        t_world.transform.rotation.x = 0.0
-        t_world.transform.rotation.y = 0.0
-        t_world.transform.rotation.z = 0.0
-        t_world.transform.rotation.w = 1.0
-
-        self.tf_static_broadcaster.sendTransform(t_world)
-        self.get_logger().info("Published static transforms.")
 
     def transform_image(self, image):
         height, width = image.shape[:2]

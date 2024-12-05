@@ -93,6 +93,21 @@ def generate_launch_description():
         description='Length of gesture sequences'
     )
 
+    # Static transforms 
+    world_to_panda = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='world_to_panda_publisher',
+        arguments=['0', '0', '-0.02', '0', '0', '0', '1', 'world', 'panda_link0']
+    )
+
+    panda_hand_to_d405 = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='hand_to_d405_publisher',
+        arguments=['0.07', '0', '0.055', '0.7071068', '0', '0.7071068', '0', 'panda_hand', 'd405_link']
+    )
+
     # Define robot-mode nodes
     rviz_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -198,4 +213,6 @@ def generate_launch_description():
         network_node,
         human_input_node,
         network_training_node,
+        world_to_panda,
+        panda_hand_to_d405,
     ])
