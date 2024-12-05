@@ -22,6 +22,7 @@
 
 #include "franka_hri_interfaces/action/pose_action.hpp"
 #include "franka_hri_interfaces/action/empty_action.hpp"
+#include "franka_hri_interfaces/msg/block_placement_info.hpp"
 #include "franka_hri_interfaces/srv/create_box.hpp"
 #include "franka_hri_interfaces/srv/update_markers.hpp"
 #include "franka_hri_interfaces/srv/sort_net.hpp"
@@ -122,8 +123,8 @@ public:
     block_markers = visualization_msgs::msg::MarkerArray();
 
     // Initialize pile positions for 4 categories
-    pile_0_start.position.x = scan_position_x - 0.2;
-    pile_0_start.position.y = -0.4;
+    pile_0_start.position.x = scan_position_x - 0.15;
+    pile_0_start.position.y = -0.3;
     pile_0_start.position.z = 0.0;
     pile_0_start.orientation.x = 1.0;
     pile_0_start.orientation.y = 0.0;
@@ -131,10 +132,10 @@ public:
     pile_0_start.orientation.w = 0.0;
 
     pile_1_start = pile_0_start;
-    pile_1_start.position.y = 0.4;
+    pile_1_start.position.y = 0.3;
 
     pile_2_start = pile_0_start;
-    pile_2_start.position.x = scan_position_x + 0.2;
+    pile_2_start.position.x = scan_position_x + 0.15;
 
     pile_3_start = pile_2_start;
     pile_3_start.position.y = 0.4;
@@ -214,7 +215,9 @@ private:
   rclcpp::CallbackGroup::SharedPtr markers_callback_group_;
   rclcpp::CallbackGroup::SharedPtr prediction_callback_group_;
   rclcpp::Client<franka_hri_interfaces::srv::GestNet>::SharedPtr train_gesture_client;
+  rclcpp::Client<franka_hri_interfaces::srv::GestNet>::SharedPtr train_complex_gesture_client;
   rclcpp::Client<franka_hri_interfaces::srv::GestNet>::SharedPtr get_gesture_prediction_client;
+  rclcpp::Client<franka_hri_interfaces::srv::GestNet>::SharedPtr get_complex_gesture_prediction_client;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr hands_detected_sub;
   rclcpp::Publisher<franka_hri_interfaces::msg::BlockPlacementInfo>::SharedPtr block_placement_pub;
   std::shared_ptr<tf2_ros::Buffer> tfBuffer;
@@ -355,35 +358,12 @@ private:
                 complex_gesture_pred = get_complex_gesture_prediction();
                 final_category = static_cast<int>(complex_gesture_pred);
             }
+
+            if (final_category < 0 || final_category > 3) {
+              final_category = predicted_category;
+            }
             
             place_in_stack(i, final_category);
-            
-            // Monitor for human intervention
-            waiting_for_human = true;
-            auto start_time = std::chrono::steady_clock::now();
-            bool human_moved_block = false;
-            int timeout_seconds = 5;
-            
-            while (waiting_for_human) {
-                if (hands_detected) {
-                    human_moved_block = true;
-                    start_time = std::chrono::steady_clock::now();
-                    
-                    while (hands_detected) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                    }
-                    break;
-                }
-                
-                auto current_time = std::chrono::steady_clock::now();
-                auto elapsed_time = std::chrono::duration_cast<std::chrono::seconds>(current_time - start_time);
-                if (elapsed_time.count() >= timeout_seconds) {
-                    waiting_for_human = false;
-                    break;
-                }
-                
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
 
             // Train networks based on actual results
             if (simple_gesture_pred != -1) {
@@ -399,11 +379,6 @@ private:
 
             // Train sorting network with final category
             train_network(i, final_category);
-
-            // Update block tracking if needed
-            if (human_moved_block) {
-                update_block_position(i, final_category);
-            }
 
             sorted_index.push_back(i);
             move_to_joints(home_joint_positions);
@@ -563,32 +538,6 @@ geometry_msgs::msg::PoseStamped get_pile_pose(int category) {
           return;
       }
   }
-  
-  geometry_msgs::msg::PoseStamped get_pile_pose(int category) {
-      geometry_msgs::msg::PoseStamped pose;
-      pose.header.stamp = this->get_clock()->now();
-      pose.header.frame_id = "world";
-      
-      switch(category) {
-          case 0:
-              pose.pose = pile_0_start;  // Back left
-              break;
-          case 1:
-              pose.pose = pile_1_start;  // Front left
-              break;
-          case 2:
-              pose.pose = pile_2_start;  // Back right
-              break;
-          case 3:
-              pose.pose = pile_3_start;  // Front right
-              break;
-          default:
-              RCLCPP_ERROR(this->get_logger(), "Invalid category: %d", category);
-              pose.pose = pile_0_start;
-      }
-      
-      return pose;
-  }
 
   void human_sorting_callback(const std_msgs::msg::Int8::SharedPtr msg)
   {
@@ -596,23 +545,40 @@ geometry_msgs::msg::PoseStamped get_pile_pose(int category) {
       human_sort_input = msg->data;
   }
 
-  void train_network(int index, int label)
+  double get_complex_gesture_prediction()
   {
-      auto request = std::make_shared<franka_hri_interfaces::srv::SortNet::Request>();
-      request->index = index;
-      request->label = label;
+      auto request = std::make_shared<franka_hri_interfaces::srv::GestNet::Request>();
 
-      while (!train_network_client->wait_for_service(std::chrono::seconds(1)))
+      while (!get_complex_gesture_prediction_client->wait_for_service(std::chrono::seconds(1)))
       {
           if (!rclcpp::ok())
           {
-              RCLCPP_ERROR(this->get_logger(), "Training service interrupted");
-              return;
+              RCLCPP_ERROR(this->get_logger(), "Gesture prediction service interrupted");
+              return -1;
           }
-          RCLCPP_INFO(this->get_logger(), "Waiting for training service");
+          RCLCPP_INFO(this->get_logger(), "Waiting for gesture prediction service");
       }
 
-      auto result_future = train_network_client->async_send_request(request);
+      // Use a promise/future pair to handle the async response
+      auto response_received = std::make_shared<std::promise<franka_hri_interfaces::srv::GestNet::Response::SharedPtr>>();
+      auto future_result = response_received->get_future();
+
+      auto callback = [response_received](rclcpp::Client<franka_hri_interfaces::srv::GestNet>::SharedFuture future) {
+          response_received->set_value(future.get());
+      };
+
+      // Send the request with a callback
+      get_complex_gesture_prediction_client->async_send_request(request, callback);
+
+      // Wait for the response with a timeout
+      if (future_result.wait_for(std::chrono::seconds(3)) == std::future_status::timeout) {
+          RCLCPP_ERROR(this->get_logger(), "Failed to get gesture prediction - timeout");
+          return -1;
+      }
+
+      auto result = future_result.get();
+      RCLCPP_INFO(this->get_logger(), "Complex Gesture prediction: %f", result->prediction);
+      return result->prediction;
   }
 
   double get_gesture_prediction()
@@ -691,6 +657,25 @@ geometry_msgs::msg::PoseStamped get_pile_pose(int category) {
       }
   }
 
+  void train_network(int index, int label)
+  {
+      auto request = std::make_shared<franka_hri_interfaces::srv::SortNet::Request>();
+      request->index = index;
+      request->label = label;
+
+      while (!train_network_client->wait_for_service(std::chrono::seconds(1)))
+      {
+          if (!rclcpp::ok())
+          {
+              RCLCPP_ERROR(this->get_logger(), "Training service interrupted");
+              return;
+          }
+          RCLCPP_INFO(this->get_logger(), "Waiting for training service");
+      }
+
+      auto result_future = train_network_client->async_send_request(request);
+  }
+
   double get_network_prediction(int index)
   {
       auto request = std::make_shared<franka_hri_interfaces::srv::SortNet::Request>();
@@ -730,99 +715,104 @@ geometry_msgs::msg::PoseStamped get_pile_pose(int category) {
 
   void place_in_stack(int i, int stack_id)
   {
-    if (stack_id==0 || stack_id==1) {
-      double top_z = pile_0_start.position.z;
-      auto place_pose = geometry_msgs::msg::Pose();
-      
-      int max_blocks = 3;
-      if (stack_id==0) {
-        if (pile_0_index.size() >= static_cast<std::vector<int>::size_type>(max_blocks))
-        {
-          pile_0_index = {};
-          pile_0_start.position.x += -0.15;
-        }
-        if (pile_0_index.size() > 0){ 
-          auto last_marker_index = pile_0_index.back();
-          auto last_marker = block_markers.markers[last_marker_index];
-          top_z = last_marker.pose.position.z + (last_marker.scale.z / 2);
-        }
-        place_pose = pile_0_start;
-      } else if (stack_id==1) {
-        if (pile_1_index.size() >= static_cast<std::vector<int>::size_type>(max_blocks)){
-          pile_1_index = {};
-          pile_1_start.position.x += -0.15;
-        }
-        if (pile_1_index.size() > 0){ 
-          auto last_marker_index = pile_1_index.back();
-          auto last_marker = block_markers.markers[last_marker_index];
-          top_z = last_marker.pose.position.z + (last_marker.scale.z / 2);
-        }
-        place_pose = pile_1_start;
+      if (stack_id >= 0 && stack_id <= 3) {
+          double top_z = (stack_id == 0) ? pile_0_start.position.z :
+                        (stack_id == 1) ? pile_1_start.position.z :
+                        (stack_id == 2) ? pile_2_start.position.z : 
+                                        pile_3_start.position.z;
+          auto place_pose = geometry_msgs::msg::Pose();
+          
+          int max_blocks = 3;
+          std::vector<int>* current_pile_index;
+          geometry_msgs::msg::Pose* current_pile_start;
+
+          // Determine which pile we're working with
+          switch(stack_id) {
+              case 0:
+                  current_pile_index = &pile_0_index;
+                  current_pile_start = &pile_0_start;
+                  break;
+              case 1:
+                  current_pile_index = &pile_1_index;
+                  current_pile_start = &pile_1_start;
+                  break;
+              case 2:
+                  current_pile_index = &pile_2_index;
+                  current_pile_start = &pile_2_start;
+                  break;
+              case 3:
+                  current_pile_index = &pile_3_index;
+                  current_pile_start = &pile_3_start;
+                  break;
+              default:
+                  RCLCPP_ERROR(this->get_logger(), "Invalid stack ID");
+                  return;
+          }
+
+          // Check if current pile is full
+          if (current_pile_index->size() >= static_cast<std::vector<int>::size_type>(max_blocks)) {
+              current_pile_index->clear();
+              current_pile_start->position.x += -0.15;  // Start new pile further back
+          }
+
+          // Calculate top of current pile
+          if (current_pile_index->size() > 0) {
+              auto last_marker_index = current_pile_index->back();
+              auto last_marker = block_markers.markers[last_marker_index];
+              top_z = last_marker.pose.position.z + (last_marker.scale.z / 2);
+          }
+          place_pose = *current_pile_start;
+
+          // Set proper z height
+          double z_add = (block_markers.markers[i].scale.z / 2);
+          if (z_add < 0.02) {
+              z_add = 0.02;
+          }
+          place_pose.position.z = top_z + z_add;
+
+          // Move to hover position
+          auto hover_pose = geometry_msgs::msg::PoseStamped();
+          hover_pose.header.stamp = this->get_clock()->now();
+          hover_pose.header.frame_id = "world";
+          hover_pose.pose.position.x = place_pose.position.x;
+          hover_pose.pose.position.y = place_pose.position.y;
+          hover_pose.pose.position.z = place_pose.position.z + 0.1;
+          hover_pose.pose.orientation.x = 1.0;
+          hover_pose.pose.orientation.y = 0.0;
+          hover_pose.pose.orientation.z = 0.0;
+          hover_pose.pose.orientation.w = 0.0;
+          
+          double planning_time = 10.;
+          double vel_factor = 0.4;
+          double accel_factor = 0.1;
+          move_to_pose(hover_pose, planning_time, vel_factor, accel_factor);
+
+          // Remove collision objects for current pile
+          for (int j = 0; j < current_pile_index->size(); ++j) {
+              int id = (*current_pile_index)[j];
+              std::string id_string = std::to_string(id);
+              auto block_id = std_msgs::msg::String();
+              block_id.data = id_string;
+              remove_collision_box(block_id);
+          }
+
+          // Add block to pile
+          current_pile_index->push_back(i);
+
+          // Place block
+          place_block(place_pose, i);
+
+          // Recreate collision boxes for entire pile
+          for (int j = 0; j < current_pile_index->size(); ++j) {
+              int id = (*current_pile_index)[j];
+              std::string id_string = std::to_string(id);
+              auto block_id = std_msgs::msg::String();
+              block_id.data = id_string;
+              create_collision_box(block_markers.markers[id].pose, block_markers.markers[id].scale, block_id);
+          }
+      } else {
+          RCLCPP_ERROR(this->get_logger(), "Invalid stack ID: %d", stack_id);
       }
-
-      double z_add = (block_markers.markers[i].scale.z / 2);
-      if (z_add < 0.02) {
-        z_add = 0.02;
-      }
-      place_pose.position.z = top_z + z_add;
-
-      auto hover_pose = geometry_msgs::msg::PoseStamped();
-      hover_pose.header.stamp = this->get_clock()->now();
-      hover_pose.header.frame_id = "world";
-      hover_pose.pose.position.x = place_pose.position.x;
-      hover_pose.pose.position.y = place_pose.position.y;
-      hover_pose.pose.position.z = place_pose.position.z + 0.15;
-      hover_pose.pose.orientation.x = 1.0;
-      hover_pose.pose.orientation.y = 0.0;
-      hover_pose.pose.orientation.z = 0.0;
-      hover_pose.pose.orientation.w = 0.0;
-      double planning_time = 10.;
-      double vel_factor = 0.4;
-      double accel_factor = 0.1;
-      move_to_pose(hover_pose, planning_time, vel_factor, accel_factor);
-
-      if (stack_id==0) {
-        for (int j = 0; j < pile_0_index.size(); ++j) {
-            int id = pile_0_index[j];
-            std::string id_string = std::to_string(id);
-            auto block_id = std_msgs::msg::String();
-            block_id.data = id_string;
-            remove_collision_box(block_id);
-        }
-        pile_0_index.push_back(i);
-      } else if (stack_id==1) {
-        for (int j = 0; j < pile_1_index.size(); ++j) {
-            int id = pile_1_index[j];
-            std::string id_string = std::to_string(id);
-            auto block_id = std_msgs::msg::String();
-            block_id.data = id_string;
-            remove_collision_box(block_id);
-        }
-        pile_1_index.push_back(i);
-      }
-
-      place_block(place_pose, i);
-
-      if (stack_id==0) {
-        for (int j = 0; j < pile_0_index.size(); ++j) {
-            int id = pile_0_index[j];
-            std::string id_string = std::to_string(id);
-            auto block_id = std_msgs::msg::String();
-            block_id.data = id_string;
-            create_collision_box(block_markers.markers[id].pose, block_markers.markers[id].scale, block_id);
-        }
-      } else if (stack_id==1) {
-        for (int j = 0; j < pile_1_index.size(); ++j) {
-            int id = pile_1_index[j];
-            std::string id_string = std::to_string(id);
-            auto block_id = std_msgs::msg::String();
-            block_id.data = id_string;
-            create_collision_box(block_markers.markers[id].pose, block_markers.markers[id].scale, block_id);
-        }
-      }
-    } else {
-      RCLCPP_INFO(this->get_logger(), "Invalid stack ID");
-    }
   }
 
   void place_block(geometry_msgs::msg::Pose place_pose, int marker_index)
@@ -859,7 +849,7 @@ geometry_msgs::msg::PoseStamped get_pile_pose(int category) {
 
     auto retreat_pose = drop_pose;
     retreat_pose.pose.position.x += -0.05;
-    retreat_pose.pose.position.z += 0.25;
+    retreat_pose.pose.position.z += 0.15;
     move_to_pose(retreat_pose, planning_time, vel_factor, accel_factor);
 
     // Create promise/future pair to handle async response

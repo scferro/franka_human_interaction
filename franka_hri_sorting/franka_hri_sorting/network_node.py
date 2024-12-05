@@ -1,8 +1,8 @@
 import rclpy
 from rclpy.node import Node
 from std_srvs.srv import Empty
-from franka_hri_interfaces.srv import SortNet, GestNet, SaveModel
-from sensor_msgs.msg import Image
+from franka_hri_interfaces.srv import SortNet, GestNet, SaveModel, CorrectionService
+from sensor_msgs.msg import Image 
 from std_msgs.msg import Float32MultiArray
 import torch
 import numpy as np
@@ -18,12 +18,40 @@ from datetime import datetime
 import threading
 from dataclasses import dataclass
 from typing import Optional, Dict, List, Tuple
+import copy
+
+class NetworkState:
+    """Class to store network state for potential rollback."""
+    def __init__(self, model_state, optimizer_state, scheduler_state):
+        self.model_state = model_state
+        self.optimizer_state = optimizer_state
+        self.scheduler_state = scheduler_state
+
+    @classmethod
+    def from_network(cls, network):
+        return cls(
+            copy.deepcopy(network.state_dict()),
+            copy.deepcopy(network.optimizer.state_dict()),
+            copy.deepcopy(network.scheduler.state_dict())
+        )
+
+    def apply_to_network(self, network):
+        network.load_state_dict(self.model_state)
+        network.optimizer.load_state_dict(self.optimizer_state)
+        network.scheduler.load_state_dict(self.scheduler_state)
+
+@dataclass
+class TrainingSample:
+    """Stores information about a training sample."""
+    input_data: any  # Image or sequence
+    label: int
+    network_state: NetworkState
+    buffer_state: any  
 
 class NetworkLogger:
     """Manages all logging operations for network predictions and performance."""
     
     def __init__(self, log_dir: str):
-        """Initialize the logger with specified directory."""
         self.log_dir = log_dir
         self.lock = threading.Lock()
         
@@ -35,6 +63,7 @@ class NetworkLogger:
         self.sorting_log = os.path.join(log_dir, f"sorting_predictions_{timestamp}.csv")
         self.gesture_log = os.path.join(log_dir, f"gesture_predictions_{timestamp}.csv")
         self.complex_gesture_log = os.path.join(log_dir, f"complex_gesture_predictions_{timestamp}.csv")
+        self.correction_log = os.path.join(log_dir, f"corrections_{timestamp}.csv")
         self.stats_file = os.path.join(log_dir, f"network_stats_{timestamp}.json")
         
         # Initialize statistics tracking
@@ -42,6 +71,7 @@ class NetworkLogger:
             'complex_sorting': {
                 'correct': 0,
                 'total': 0,
+                'corrections': 0,
                 'confusion_matrix': [[0, 0, 0, 0], [0, 0, 0, 0], 
                                    [0, 0, 0, 0], [0, 0, 0, 0]],
                 'average_confidence': 0.0,
@@ -50,6 +80,7 @@ class NetworkLogger:
             'binary_gesture': {
                 'correct': 0,
                 'total': 0,
+                'corrections': 0,
                 'confusion_matrix': [[0, 0], [0, 0]],
                 'average_confidence': 0.0,
                 'total_confidence': 0.0
@@ -57,6 +88,7 @@ class NetworkLogger:
             'complex_gesture': {
                 'correct': 0,
                 'total': 0,
+                'corrections': 0,
                 'confusion_matrix': [[0, 0, 0, 0], [0, 0, 0, 0],
                                    [0, 0, 0, 0], [0, 0, 0, 0]],
                 'average_confidence': 0.0,
@@ -68,7 +100,7 @@ class NetworkLogger:
 
     def _init_log_files(self):
         """Create log files with headers."""
-        headers = [
+        prediction_headers = [
             'timestamp',
             'prediction',
             'confidence',
@@ -77,10 +109,41 @@ class NetworkLogger:
             'response_time_ms'
         ]
         
+        correction_headers = [
+            'timestamp',
+            'network_type',
+            'old_label',
+            'new_label',
+            'success'
+        ]
+        
         for log_file in [self.sorting_log, self.gesture_log, self.complex_gesture_log]:
             with open(log_file, 'w', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow(headers)
+                writer.writerow(prediction_headers)
+                
+        with open(self.correction_log, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(correction_headers)
+
+    def log_correction(self, network_type: str, old_label: int, new_label: int, success: bool):
+        """Log a correction attempt."""
+        with self.lock:
+            timestamp = datetime.now().timestamp()
+            
+            with open(self.correction_log, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    datetime.fromtimestamp(timestamp).isoformat(),
+                    network_type,
+                    old_label,
+                    new_label,
+                    success
+                ])
+            
+            if success:
+                self.stats[network_type]['corrections'] += 1
+                self._save_stats()
 
     def log_prediction_and_feedback(self, network_type: str, prediction: float, 
                                   confidence: float, true_label: float) -> None:
@@ -154,8 +217,10 @@ class NetworkLogger:
             for network_type, stats in stats_copy.items():
                 if stats['total'] > 0:
                     stats['accuracy'] = stats['correct'] / stats['total']
+                    stats['correction_rate'] = stats['corrections'] / stats['total']
                 else:
                     stats['accuracy'] = 0.0
+                    stats['correction_rate'] = 0.0
                     
             return stats_copy
 
@@ -171,6 +236,7 @@ class NetworkNode(Node):
         self._init_buffers()
         self._init_services()
         self._init_subscribers()
+        self._init_correction_state()
         
         # Create timer for periodic stats logging
         self.create_timer(300.0, self._periodic_stats_logging)
@@ -179,7 +245,6 @@ class NetworkNode(Node):
 
     def _init_parameters(self):
         """Initialize all ROS parameters."""
-        # Declare and get all parameters
         self.declare_parameter('buffer_size', 25)
         self.declare_parameter('sequence_length', 20)
         self.declare_parameter('sorting_model_path', '')
@@ -188,7 +253,6 @@ class NetworkNode(Node):
         self.declare_parameter('save_directory', '/home/user/saved_models')
         self.declare_parameter('log_directory', '/home/user/network_logs')
         
-        # Store parameter values
         self.buffer_size = self.get_parameter('buffer_size').value
         self.sequence_length = self.get_parameter('sequence_length').value
         self.sorting_model_path = self.get_parameter('sorting_model_path').value
@@ -197,25 +261,21 @@ class NetworkNode(Node):
         self.save_dir = self.get_parameter('save_directory').value
         self.log_dir = self.get_parameter('log_directory').value
         
-        # Create logger
         self.logger = NetworkLogger(self.log_dir)
 
     def _init_networks(self):
         """Initialize neural networks."""
         try:
-            # Initialize complex sorting network with 4 classes
             self.sorting_net = ComplexSortingNet(
                 num_classes=4,
                 model_path=self.sorting_model_path
             )
             
-            # Initialize binary gesture network
             self.gesture_net = GestureNet(
                 sequence_length=self.sequence_length,
                 model_path=self.gesture_model_path
             )
             
-            # Initialize complex gesture network with 4 classes
             self.complex_gesture_net = ComplexGestureNet(
                 num_classes=4,
                 sequence_length=self.sequence_length,
@@ -230,79 +290,50 @@ class NetworkNode(Node):
 
     def _init_buffers(self):
         """Initialize all data buffers."""
-        # Training data buffers for complex sorting (4 classes)
         self.sorting_class_buffers = [
             deque(maxlen=self.buffer_size) for _ in range(4)
         ]
         
-        # Training data buffers for binary gesture
         self.gesture_class_0 = deque(maxlen=self.buffer_size)
         self.gesture_class_1 = deque(maxlen=self.buffer_size)
         
-        # Training data buffers for complex gesture (4 classes)
         self.complex_gesture_buffers = [
             deque(maxlen=self.buffer_size) for _ in range(4)
         ]
         
-        # Sensor data buffers
         self.mod48_buffer = None
         self.combined_sequence = []
         self.last_inference_sequence = []
 
+    def _init_correction_state(self):
+        """Initialize state tracking for corrections."""
+        self.last_training_samples = {
+            'sorting': None,
+            'gesture': None,
+            'complex_gesture': None
+        }
+
     def _init_services(self):
         """Initialize all ROS services."""
-        # Sorting network services
-        self.create_service(
-            SortNet, 
-            'train_sorting', 
-            self.train_sorting_callback
-        )
-        self.create_service(
-            SortNet, 
-            'get_sorting_prediction',
-            self.get_sorting_prediction_callback
-        )
+        # Training services
+        self.create_service(SortNet, 'train_sorting', self.train_sorting_callback)
+        self.create_service(GestNet, 'train_gesture', self.train_gesture_callback)
+        self.create_service(GestNet, 'train_complex_gesture', self.train_complex_gesture_callback)
         
-        # Binary gesture network services
-        self.create_service(
-            GestNet, 
-            'train_gesture', 
-            self.train_gesture_callback
-        )
-        self.create_service(
-            GestNet, 
-            'get_gesture_prediction',
-            self.get_gesture_prediction_callback
-        )
-        
-        # Complex gesture network services
-        self.create_service(
-            GestNet, 
-            'train_complex_gesture',
-            self.train_complex_gesture_callback
-        )
-        self.create_service(
-            GestNet, 
-            'get_complex_gesture_prediction',
-            self.get_complex_gesture_prediction_callback
-        )
+        # Prediction services
+        self.create_service(SortNet, 'get_sorting_prediction', self.get_sorting_prediction_callback)
+        self.create_service(GestNet, 'get_gesture_prediction', self.get_gesture_prediction_callback)
+        self.create_service(GestNet, 'get_complex_gesture_prediction', self.get_complex_gesture_prediction_callback)
         
         # Model saving services
-        self.create_service(
-            SaveModel, 
-            'save_sorting_network',
-            self.save_sorting_callback
-        )
-        self.create_service(
-            SaveModel, 
-            'save_gesture_network',
-            self.save_gesture_callback
-        )
-        self.create_service(
-            SaveModel, 
-            'save_complex_gesture_network',
-            self.save_complex_gesture_callback
-        )
+        self.create_service(SaveModel, 'save_sorting_network', self.save_sorting_callback)
+        self.create_service(SaveModel, 'save_gesture_network', self.save_gesture_callback)
+        self.create_service(SaveModel, 'save_complex_gesture_network', self.save_complex_gesture_callback)
+        
+        # Correction services
+        self.create_service(CorrectionService, 'correct_sorting', self.correct_sorting_callback)
+        self.create_service(CorrectionService, 'correct_gesture', self.correct_gesture_callback)
+        self.create_service(CorrectionService, 'correct_complex_gesture', self.correct_complex_gesture_callback)
 
     def _init_subscribers(self):
         """Initialize all ROS subscribers."""
@@ -319,6 +350,49 @@ class NetworkNode(Node):
             10
         )
 
+    def _cache_training_state(self, network_type: str, input_data: any, label: int):
+        """Cache network and buffer state before training."""
+        if network_type == 'sorting':
+            network = self.sorting_net
+            buffer_state = [list(buffer) for buffer in self.sorting_class_buffers]
+        elif network_type == 'gesture':
+            network = self.gesture_net
+            buffer_state = (list(self.gesture_class_0), list(self.gesture_class_1))
+        else:  # complex_gesture
+            network = self.complex_gesture_net
+            buffer_state = [list(buffer) for buffer in self.complex_gesture_buffers]
+            
+        network_state = NetworkState.from_network(network)
+        
+        self.last_training_samples[network_type] = TrainingSample(
+            input_data=copy.deepcopy(input_data),
+            label=label,
+            network_state=network_state,
+            buffer_state=buffer_state
+        )
+
+    def _restore_training_state(self, network_type: str) -> Optional[TrainingSample]:
+        """Restore network and buffer state from cache."""
+        sample = self.last_training_samples[network_type]
+        if sample is None:
+            return None
+            
+        if network_type == 'sorting':
+            network = self.sorting_net
+            self.sorting_class_buffers = [deque(buffer, maxlen=self.buffer_size) 
+                                        for buffer in sample.buffer_state]
+        elif network_type == 'gesture':
+            network = self.gesture_net
+            self.gesture_class_0 = deque(sample.buffer_state[0], maxlen=self.buffer_size)
+            self.gesture_class_1 = deque(sample.buffer_state[1], maxlen=self.buffer_size)
+        else:  # complex_gesture
+            network = self.complex_gesture_net
+            self.complex_gesture_buffers = [deque(buffer, maxlen=self.buffer_size) 
+                                          for buffer in sample.buffer_state]
+            
+        sample.network_state.apply_to_network(network)
+        return sample
+
     def _periodic_stats_logging(self):
         """Timer callback to log periodic statistics."""
         try:
@@ -332,7 +406,6 @@ class NetworkNode(Node):
     def get_sorting_prediction_callback(self, request, response):
         """Handle prediction requests for the sorting network."""
         try:
-            # Convert image and make prediction
             cv_image = self.bridge.imgmsg_to_cv2(
                 request.image, 
                 desired_encoding='rgb8'
@@ -341,10 +414,10 @@ class NetworkNode(Node):
             
             with torch.no_grad():
                 output = self.sorting_net(image_tensor)
-                prediction = output.numpy()[0]  # Get probabilities for all classes
+                prediction = output.numpy()[0]
                 confidence = float(torch.max(output).item())
             
-            response.prediction = float(np.argmax(prediction))  # Return predicted class
+            response.prediction = float(np.argmax(prediction))
             
             self.get_logger().info(
                 f'Sorting prediction: {response.prediction} '
@@ -364,7 +437,6 @@ class NetworkNode(Node):
                 response.prediction = -1.0
                 return response
 
-            # Process and normalize sequence
             sequence_tensor = self.process_sensor_data(self.combined_sequence)
             if sequence_tensor is None:
                 response.prediction = -1.0
@@ -372,7 +444,6 @@ class NetworkNode(Node):
 
             normalized_sequence = self.normalize_sequence(sequence_tensor)
             
-            # Make prediction
             with torch.no_grad():
                 output = self.gesture_net(normalized_sequence)
                 prediction = float(output.item())
@@ -385,7 +456,7 @@ class NetworkNode(Node):
                 f'(confidence: {confidence:.3f})'
             )
             
-            self.last_inference_sequence = self.combined_sequence
+            self.last_inference_sequence = self.combined_sequence.copy()
             return response
             
         except Exception as e:
@@ -400,7 +471,6 @@ class NetworkNode(Node):
                 response.prediction = -1.0
                 return response
 
-            # Process and normalize sequence
             sequence_tensor = self.process_sensor_data(self.combined_sequence)
             if sequence_tensor is None:
                 response.prediction = -1.0
@@ -408,20 +478,19 @@ class NetworkNode(Node):
 
             normalized_sequence = self.normalize_sequence(sequence_tensor)
             
-            # Make prediction
             with torch.no_grad():
                 output = self.complex_gesture_net(normalized_sequence)
-                prediction = output.numpy()[0]  # Get probabilities for all classes
+                prediction = output.numpy()[0]
                 confidence = float(torch.max(output).item())
             
-            response.prediction = float(np.argmax(prediction))  # Return predicted class
+            response.prediction = float(np.argmax(prediction))
             
             self.get_logger().info(
                 f'Complex gesture prediction: {response.prediction} '
                 f'(confidence: {confidence:.3f})'
             )
             
-            self.last_inference_sequence = self.combined_sequence
+            self.last_inference_sequence = self.combined_sequence.copy()
             return response
             
         except Exception as e:
@@ -432,10 +501,12 @@ class NetworkNode(Node):
     def train_sorting_callback(self, request, response):
         """Handle training requests for the complex sorting network."""
         try:
-            # Convert image and preprocess
-            cv_image = self.bridge.imgmsg_to_cv2(request.image, 
-                                                desired_encoding='rgb8')
+            # Convert image and cache state
+            cv_image = self.bridge.imgmsg_to_cv2(request.image, desired_encoding='rgb8')
             image_tensor = self._preprocess_image(cv_image)
+            
+            # Cache current state
+            self._cache_training_state('sorting', request.image, request.label)
 
             # Add to appropriate class buffer
             class_idx = int(request.label)
@@ -491,7 +562,10 @@ class NetworkNode(Node):
                 response.prediction = -1.0
                 return response
 
-            # Process and normalize sequence
+            # Cache current state
+            self._cache_training_state('gesture', self.last_inference_sequence, request.label)
+
+            # Process sequence
             sequence_tensor = self.process_sensor_data(
                 self.last_inference_sequence)
             if sequence_tensor is None:
@@ -550,7 +624,12 @@ class NetworkNode(Node):
                 response.prediction = -1.0
                 return response
 
-            # Process and normalize sequence
+            # Cache current state
+            self._cache_training_state('complex_gesture', 
+                                     self.last_inference_sequence, 
+                                     request.label)
+
+            # Process sequence
             sequence_tensor = self.process_sensor_data(
                 self.last_inference_sequence)
             if sequence_tensor is None:
@@ -602,6 +681,128 @@ class NetworkNode(Node):
             response.prediction = -1.0
             return response
 
+    def correct_sorting_callback(self, request, response):
+        """Handle correction requests for sorting network."""
+        try:
+            # Restore previous state
+            sample = self._restore_training_state('sorting')
+            if sample is None:
+                response.success = False
+                response.message = "No previous training sample found"
+                return response
+
+            if request.old_label != sample.label:
+                response.success = False
+                response.message = "Old label doesn't match last training"
+                return response
+
+            # Create new training request with corrected label
+            new_request = SortNet.Request()
+            new_request.image = sample.input_data
+            new_request.label = request.new_label
+
+            # Retrain with corrected label
+            train_response = self.train_sorting_callback(new_request, SortNet.Response())
+            success = train_response.prediction >= 0
+
+            # Log correction
+            self.logger.log_correction('complex_sorting', 
+                                     request.old_label,
+                                     request.new_label, 
+                                     success)
+
+            response.success = success
+            response.message = "Correction applied successfully"
+            return response
+
+        except Exception as e:
+            response.success = False
+            response.message = f"Error applying correction: {str(e)}"
+            return response
+
+    def correct_gesture_callback(self, request, response):
+        """Handle correction requests for gesture network."""
+        try:
+            # Restore previous state
+            sample = self._restore_training_state('gesture')
+            if sample is None:
+                response.success = False
+                response.message = "No previous training sample found"
+                return response
+
+            if request.old_label != sample.label:
+                response.success = False
+                response.message = "Old label doesn't match last training"
+                return response
+
+            # Recreate last sequence
+            self.last_inference_sequence = sample.input_data.copy()
+
+            # Create new training request with corrected label
+            new_request = GestNet.Request()
+            new_request.label = request.new_label
+
+            # Retrain with corrected label
+            train_response = self.train_gesture_callback(new_request, GestNet.Response())
+            success = train_response.prediction >= 0
+
+            # Log correction
+            self.logger.log_correction('binary_gesture', 
+                                     request.old_label,
+                                     request.new_label, 
+                                     success)
+
+            response.success = success
+            response.message = "Correction applied successfully"
+            return response
+
+        except Exception as e:
+            response.success = False
+            response.message = f"Error applying correction: {str(e)}"
+            return response
+
+    def correct_complex_gesture_callback(self, request, response):
+        """Handle correction requests for complex gesture network."""
+        try:
+            # Restore previous state
+            sample = self._restore_training_state('complex_gesture')
+            if sample is None:
+                response.success = False
+                response.message = "No previous training sample found"
+                return response
+
+            if request.old_label != sample.label:
+                response.success = False
+                response.message = "Old label doesn't match last training"
+                return response
+
+            # Recreate last sequence
+            self.last_inference_sequence = sample.input_data.copy()
+
+            # Create new training request with corrected label
+            new_request = GestNet.Request()
+            new_request.label = request.new_label
+
+            # Retrain with corrected label
+            train_response = self.train_complex_gesture_callback(
+                new_request, GestNet.Response())
+            success = train_response.prediction >= 0
+
+            # Log correction
+            self.logger.log_correction('complex_gesture', 
+                                     request.old_label,
+                                     request.new_label, 
+                                     success)
+
+            response.success = success
+            response.message = "Correction applied successfully"
+            return response
+
+        except Exception as e:
+            response.success = False
+            response.message = f"Error applying correction: {str(e)}"
+            return response
+
     def save_sorting_callback(self, request, response):
         """Save sorting network to file."""
         try:
@@ -612,10 +813,7 @@ class NetworkNode(Node):
             else:
                 filepath = f"{self.save_dir}/sorting_net_{timestamp}.pt"
             
-            # Ensure directory exists
             os.makedirs(os.path.dirname(filepath), exist_ok=True)
-            
-            # Save network
             self.sorting_net.save_model(filepath)
             
             response.filepath = filepath
@@ -640,10 +838,7 @@ class NetworkNode(Node):
             else:
                 filepath = f"{self.save_dir}/gesture_net_{timestamp}.pt"
             
-            # Ensure directory exists
             os.makedirs(os.path.dirname(filepath), exist_ok=True)
-            
-            # Save network
             self.gesture_net.save_model(filepath)
             
             response.filepath = filepath
@@ -668,10 +863,7 @@ class NetworkNode(Node):
             else:
                 filepath = f"{self.save_dir}/complex_gesture_net_{timestamp}.pt"
             
-            # Ensure directory exists
             os.makedirs(os.path.dirname(filepath), exist_ok=True)
-            
-            # Save network
             self.complex_gesture_net.save_model(filepath)
             
             response.filepath = filepath
@@ -772,30 +964,22 @@ class NetworkNode(Node):
 
     def _balance_multi_class_data(self, class_buffers):
         """Balance multiple class buffers for training."""
-        # Convert all buffers to lists
         class_samples = [list(buffer) for buffer in class_buffers]
-        
-        # Get lengths of non-empty buffers
         lengths = [len(samples) for samples in class_samples]
-        
-        # Find which categories have samples
         non_empty_indices = [i for i, length in enumerate(lengths) if length > 0]
         
         if not non_empty_indices:
             self.get_logger().warn("No samples available for training")
             return [], []
         
-        # Use only non-empty categories
         target_size = max(len(class_samples[i]) for i in non_empty_indices)
         
         balanced_samples = []
         balanced_labels = []
         
-        # Process each non-empty category
         for class_idx in non_empty_indices:
             samples = class_samples[class_idx]
             if len(samples) < target_size:
-                # Oversample from this category to match target size
                 additional = random.choices(
                     samples,
                     k=target_size - len(samples)
@@ -808,7 +992,6 @@ class NetworkNode(Node):
                 for _ in range(target_size)
             ])
         
-        # Shuffle samples and labels together
         combined = list(zip(balanced_samples, balanced_labels))
         random.shuffle(combined)
         balanced_samples, balanced_labels = zip(*combined)
@@ -856,6 +1039,7 @@ class NetworkNode(Node):
 
         except Exception as e:
             self.get_logger().error(f'Error processing modality 51 data: {str(e)}')
+
 
 def main(args=None):
     """Main function to initialize and run the node."""

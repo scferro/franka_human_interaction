@@ -26,7 +26,9 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/GestNet.srv"
   "srv/VLAService.srv"
   "srv/SaveModel.srv"
+  "srv/CorrectionService.srv"
   "msg/EECommand.msg"
+  "msg/BlockPlacementInfo.msg"
 DEPENDENCIES geometry_msgs franka_msgs visualization_msgs
 )
 
