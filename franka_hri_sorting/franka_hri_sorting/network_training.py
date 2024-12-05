@@ -140,6 +140,7 @@ class NetworkTrainingNode(Node):
                 self.get_logger().warn('Gesture prediction service not available')
                 return False
 
+            time.sleep(0.5)
             self.notify_user("Make your gesture now!")
             time.sleep(self.gesture_warning_time)
             self.notify_user("Getting gesture prediction...")
@@ -276,9 +277,9 @@ class NetworkTrainingNode(Node):
         request.label = label
         
         try:
+            self.get_logger().info(f"Sending gesture training request with label {label}")
             future = self.train_gesture_client.call_async(request)
-            rclpy.spin_until_future_complete(self, future)
-            self.get_logger().info(f"Trained gesture network with label {label}")
+                
         except Exception as e:
             self.get_logger().error(f"Error training gesture network: {str(e)}")
 
@@ -289,6 +290,11 @@ class NetworkTrainingNode(Node):
 
     def process_iteration(self):
         """Process one training iteration based on current mode."""
+        if self.waiting_for_input:
+            # Add small sleep to prevent CPU spinning
+            time.sleep(0.1)
+            return
+            
         self.get_logger().info("Starting new iteration")
         
         # Load image for non-gesture-only modes

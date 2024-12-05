@@ -38,7 +38,16 @@ class HumanInteraction(Node):
             self.localize_camera_callback
         )
         
+        # Add timer for broadcasting transform
+        self.tf_timer = self.create_timer(0.1, self.broadcast_transform_timer)
+        
         self.get_logger().info('Human Interaction node initialized')
+        
+    def broadcast_transform_timer(self):
+    """Timer callback to continuously broadcast D435 transform.""" 
+    if self.d435_transform is not None:
+        self.d435_transform.header.stamp = self.get_clock().now().to_msg()
+        self.tf_broadcaster.sendTransform(self.d435_transform)
 
     def localize_camera_callback(self, request, response):
         """Service callback to localize D435 camera using AprilTag."""
