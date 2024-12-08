@@ -16,11 +16,12 @@ def generate_launch_description():
     default_base_dir = '/home/scferro/Documents/final_project/hri_data'
     default_models_dir = os.path.join(default_base_dir, 'models')
     default_logs_dir = os.path.join(default_base_dir, 'logs')
-    default_training_images = os.path.join(default_base_dir, 'training_images')
+    default_training_images = os.path.join(default_base_dir, 'training_data/images')
+    default_training_data_save_dir = os.path.join(default_base_dir, 'training_data')
     rviz_config_file = os.path.join(franka_hri_sorting_dir, 'config', 'sorting.rviz')
     
     # Ensure all required directories exist
-    for directory in [default_models_dir, default_logs_dir, default_training_images]:
+    for directory in [default_models_dir, default_logs_dir, default_training_images, default_training_data_save_dir]:
         os.makedirs(directory, exist_ok=True)
 
     # System mode arguments
@@ -78,6 +79,19 @@ def generate_launch_description():
         'training_images_path',
         default_value=str(default_training_images),
         description='Path to training images directory'
+    )
+
+    # Data saving arguments
+    save_training_data_arg = DeclareLaunchArgument(
+        'save_training_data',
+        default_value='true',
+        description='Enable/disable saving of training data samples'
+    )
+
+    training_data_dir_arg = DeclareLaunchArgument(
+        'training_data_dir',
+        default_value=str(default_training_data_save_dir),
+        description='Directory to save training data samples'
     )
 
     # Network configuration arguments
@@ -151,7 +165,11 @@ def generate_launch_description():
             
             # Network configuration
             'buffer_size': LaunchConfiguration('buffer_size'),
-            'sequence_length': LaunchConfiguration('sequence_length')
+            'sequence_length': LaunchConfiguration('sequence_length'),
+            
+            # Data saving configuration
+            'save_training_data': LaunchConfiguration('save_training_data'),
+            'training_data_dir': LaunchConfiguration('training_data_dir')
         }],
         output='screen'
     )
@@ -201,6 +219,10 @@ def generate_launch_description():
         save_directory_arg,
         log_directory_arg,
         training_images_arg,
+        
+        # Data saving arguments
+        save_training_data_arg,
+        training_data_dir_arg,
         
         # Configuration
         buffer_size_arg,
