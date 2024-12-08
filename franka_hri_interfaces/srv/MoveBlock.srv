@@ -1,0 +1,7 @@
+# Request
+int32 block_index    # Index of the block to move/update
+int32 new_category  # New category (0-3) for the block
+---
+# Response
+bool success       # Whether the tracking update was successful
+string message     # Additional information about success/failure
