@@ -122,31 +122,6 @@ class Blocks(Node):
         self.marker_timer_period = 0.1  # seconds
         self.marker_timer = self.create_timer(self.marker_timer_period, self.marker_timer_callback)
 
-        # MediaPipe hands detector
-        self.mp_hands = mp.solutions.hands
-        self.hands = self.mp_hands.Hands(
-            static_image_mode=False,
-            max_num_hands=2,
-            min_detection_confidence=0.7
-        )
-        
-        # Publisher for hand detection
-        self.hands_detected_pub = self.create_publisher(
-            Bool, 
-            'hands_detected', 
-            10
-        )
-        
-        # Timer for hand detection
-        self.hand_detection_period = 0.2
-        self.hand_detection_timer = self.create_timer(
-            self.hand_detection_period, 
-            self.hand_detection_timer_callback
-        )
-        
-        # Initialize hand detection state
-        self.last_hand_state = False
-
         # Other setup
         self.bridge = CvBridge()
         self.block_markers = MarkerArray()
@@ -345,41 +320,6 @@ class Blocks(Node):
         self.get_logger().info("Sending response")
 
         return response
-    
-    def hand_detection_timer_callback(self):
-        """Process the latest image for hand detection and publish results."""
-        if self.last_img_msg is None:
-            return
-            
-        try:
-            # Convert ROS Image to CV2
-            cv_image = self.ros2_image_to_cv2(self.last_img_msg, encoding='bgr8')
-            if cv_image is None:
-                return
-                
-            # Convert BGR to RGB
-            rgb_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
-            
-            # Process the image
-            results = self.hands.process(rgb_image)
-            
-            # Check if hands were detected
-            hands_present = results.multi_hand_landmarks is not None
-            
-            # Only publish if state has changed
-            if hands_present != self.last_hand_state:
-                msg = Bool()
-                msg.data = hands_present
-                self.hands_detected_pub.publish(msg)
-                self.last_hand_state = hands_present
-                
-                if hands_present:
-                    self.get_logger().info('Hands detected')
-                else:
-                    self.get_logger().info('No hands detected')
-                    
-        except Exception as e:
-            self.get_logger().error(f'Error in hand detection: {str(e)}')
     
     def destroy_node(self):
         """Clean up MediaPipe resources when shutting down."""

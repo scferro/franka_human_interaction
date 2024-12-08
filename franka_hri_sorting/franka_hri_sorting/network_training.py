@@ -337,11 +337,11 @@ class NetworkTrainingNode(Node):
                         f"Enter correct class (0-3)"
                     )
                 else:
-                    pred_text = "Yes" if self.current_gesture_prediction >= 0.5 else "No"
+                    pred_text = "1" if self.current_gesture_prediction >= 0.5 else "0"
                     prob_text = f"{self.current_gesture_prediction:.2f}"
                     self.notify_user(
                         f'Binary prediction: {pred_text} (confidence: {prob_text})\n'
-                        f'Enter 1 for correct or 0 for incorrect'
+                        f'Enter correct class (0 or 1)'
                     )
                 self.get_logger().info("Waiting for human input")
             else:

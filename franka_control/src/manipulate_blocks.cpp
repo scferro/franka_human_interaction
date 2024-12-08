@@ -27,6 +27,7 @@
 #include "franka_hri_interfaces/srv/update_markers.hpp"
 #include "franka_hri_interfaces/srv/sort_net.hpp"
 #include "franka_hri_interfaces/srv/gest_net.hpp"
+#include "franka_hri_interfaces/srv/move_block.hpp"
 
 #include <moveit/robot_model_loader/robot_model_loader.h>
 #include <moveit/robot_model/robot_model.h>
@@ -61,6 +62,11 @@ public:
     pretrain_franka_srv = this->create_service<std_srvs::srv::Empty>(
             "pretrain_franka",
             std::bind(&ManipulateBlocks::pretrain_franka_callback, this, std::placeholders::_1, std::placeholders::_2));
+
+    update_piles_service = this->create_service<franka_hri_interfaces::srv::MoveBlock>(
+        "update_piles",
+        std::bind(&ManipulateBlocks::update_piles_callback, this, 
+                  std::placeholders::_1, std::placeholders::_2));
 
     scan_overhead_cli = this->create_client<franka_hri_interfaces::srv::UpdateMarkers>("scan_overhead");
     update_markers_cli = this->create_client<franka_hri_interfaces::srv::UpdateMarkers>(
@@ -220,6 +226,7 @@ private:
   rclcpp::Client<franka_hri_interfaces::srv::GestNet>::SharedPtr get_complex_gesture_prediction_client;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr hands_detected_sub;
   rclcpp::Publisher<franka_hri_interfaces::msg::BlockPlacementInfo>::SharedPtr block_placement_pub;
+  rclcpp::Service<franka_hri_interfaces::srv::MoveBlock>::SharedPtr update_piles_service;
   std::shared_ptr<tf2_ros::Buffer> tfBuffer;
   std::shared_ptr<tf2_ros::TransformListener> tfListener;
   std::shared_ptr<moveit::core::RobotModel> kinematic_model;
@@ -364,6 +371,7 @@ private:
             }
             
             place_in_stack(i, final_category);
+            publish_placement_info(i, final_category);
 
             // Train networks based on actual results
             if (simple_gesture_pred != -1) {
@@ -388,10 +396,97 @@ private:
     move_to_pose(overhead_scan_pose, planning_time, vel_factor, accel_factor);
 }
 
+void update_piles_callback(
+    const std::shared_ptr<franka_hri_interfaces::srv::MoveBlock::Request> request,
+    std::shared_ptr<franka_hri_interfaces::srv::MoveBlock::Response> response)
+{
+    // Find which pile currently contains the block
+    std::vector<std::vector<int>*> piles = {&pile_0_index, &pile_1_index, &pile_2_index, &pile_3_index};
+    std::vector<geometry_msgs::msg::Pose*> pile_starts = {&pile_0_start, &pile_1_start, &pile_2_start, &pile_3_start};
+    std::vector<int>* source_pile = nullptr;
+    std::vector<int>* target_pile = nullptr;
+    geometry_msgs::msg::Pose* target_pile_start = nullptr;
+    
+    // First remove collision objects from both source and potential target piles
+    // Remove from source pile
+    for (auto pile : piles) {
+        auto it = std::find(pile->begin(), pile->end(), request->block_index);
+        if (it != pile->end()) {
+            source_pile = pile;
+            // Remove collision objects for the entire source pile
+            for (int id : *pile) {
+                std::string id_string = std::to_string(id);
+                auto block_id = std_msgs::msg::String();
+                block_id.data = id_string;
+                remove_collision_box(block_id);
+            }
+            pile->erase(it);
+            break;
+        }
+    }
+
+    // Get target pile based on new category
+    if (request->new_category >= 0 && request->new_category < 4) {
+        target_pile = piles[request->new_category];
+        target_pile_start = pile_starts[request->new_category];
+        
+        // Remove collision objects from target pile
+        for (int id : *target_pile) {
+            std::string id_string = std::to_string(id);
+            auto block_id = std_msgs::msg::String();
+            block_id.data = id_string;
+            remove_collision_box(block_id);
+        }
+    } else {
+        RCLCPP_ERROR(this->get_logger(), "Invalid target category");
+        response->success = false;
+        return;
+    }
+
+    // Check if target pile is at capacity
+    if (target_pile->size() >= 3) {
+        target_pile->clear();  // Start a new pile if current one is full
+        target_pile_start->position.x += -0.15;  // Move pile start back for new stack
+    }
+
+    // Add block to new pile's tracking
+    target_pile->push_back(request->block_index);
+
+    // Recreate collision objects for both piles with updated positions
+    // This ensures the planning scene stays accurate
+    
+    // Recreate source pile collision objects if it's not empty
+    if (source_pile && !source_pile->empty()) {
+        for (int id : *source_pile) {
+            std::string id_string = std::to_string(id);
+            auto block_id = std_msgs::msg::String();
+            block_id.data = id_string;
+            create_collision_box(block_markers.markers[id].pose, 
+                               block_markers.markers[id].scale, 
+                               block_id);
+        }
+    }
+
+    // Recreate target pile collision objects
+    for (int id : *target_pile) {
+        std::string id_string = std::to_string(id);
+        auto block_id = std_msgs::msg::String();
+        block_id.data = id_string;
+        create_collision_box(block_markers.markers[id].pose, 
+                           block_markers.markers[id].scale, 
+                           block_id);
+    }
+
+    // Publish updated block placement information
+    publish_placement_info(request->block_index, request->new_category);
+    
+    response->success = true;
+}
 
 // helper function to publish placement info
-void publish_placement_info(int last_placed_category) {
+void publish_placement_info(int last_block_index, int last_placed_category) {
     auto msg = franka_hri_interfaces::msg::BlockPlacementInfo();
+    msg.last_block_index = last_block_index;
     
     // Set last block info
     if (!block_markers.markers.empty()) {

@@ -223,6 +223,84 @@ class NetworkLogger:
                     stats['correction_rate'] = 0.0
                     
             return stats_copy
+class DataSaver:
+    """Manages saving of training data samples."""
+    def __init__(self, base_dir: str, enabled: bool = True):
+        self.enabled = enabled
+        if not enabled:
+            return
+            
+        # Create directory structure
+        self.base_dir = Path(base_dir)
+        self.image_dir = self.base_dir / 'images'
+        self.gesture_dir = self.base_dir / 'gestures'
+        
+        # Ensure directories exist
+        self.image_dir.mkdir(parents=True, exist_ok=True)
+        self.gesture_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create timestamped files for this session
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.image_file = self.image_dir / f"image_data_{timestamp}.csv"
+        self.gesture_file = self.gesture_dir / f"gesture_data_{timestamp}.csv"
+        
+        # Initialize files with headers
+        self._init_files()
+        
+    def _init_files(self):
+        """Initialize CSV files with headers."""
+        image_headers = ['timestamp', 'label', 'confidence', 'filename']
+        gesture_headers = ['timestamp', 'label', 'confidence', 'sequence_data']
+        
+        with open(self.image_file, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(image_headers)
+            
+        with open(self.gesture_file, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(gesture_headers)
+    
+    def save_image_data(self, image_tensor: torch.Tensor, label: int, 
+                       confidence: float = None):
+        """Save image data and metadata."""
+        if not self.enabled:
+            return
+            
+        try:
+            timestamp = datetime.now().isoformat()
+            
+            # Save image tensor as numpy array
+            image_name = f"image_{timestamp}.npy"
+            image_path = self.image_dir / image_name
+            np.save(image_path, image_tensor.numpy())
+            
+            # Save metadata to CSV
+            with open(self.image_file, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([timestamp, label, confidence, image_name])
+                
+        except Exception as e:
+            print(f"Error saving image data: {e}")
+    
+    def save_gesture_data(self, sequence: list, label: int, 
+                         confidence: float = None):
+        """Save gesture sequence data and metadata."""
+        if not self.enabled:
+            return
+            
+        try:
+            timestamp = datetime.now().isoformat()
+            
+            # Convert sequence to string representation
+            sequence_str = str(sequence)
+            
+            # Save to CSV
+            with open(self.gesture_file, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([timestamp, label, confidence, sequence_str])
+                
+        except Exception as e:
+            print(f"Error saving gesture data: {e}")
 
 class NetworkNode(Node):
     """Main node for managing neural networks and predictions."""
@@ -252,6 +330,8 @@ class NetworkNode(Node):
         self.declare_parameter('complex_gesture_model_path', '')
         self.declare_parameter('save_directory', '/home/user/saved_models')
         self.declare_parameter('log_directory', '/home/user/network_logs')
+        self.declare_parameter('save_training_data', True)
+        self.declare_parameter('training_data_dir', '/home/user/training_data')
         
         self.buffer_size = self.get_parameter('buffer_size').value
         self.sequence_length = self.get_parameter('sequence_length').value
@@ -260,8 +340,11 @@ class NetworkNode(Node):
         self.complex_gesture_model_path = self.get_parameter('complex_gesture_model_path').value
         self.save_dir = self.get_parameter('save_directory').value
         self.log_dir = self.get_parameter('log_directory').value
+        save_training = self.get_parameter('save_training_data').value
+        training_data_dir = self.get_parameter('training_data_dir').value
         
         self.logger = NetworkLogger(self.log_dir)
+        self.data_saver = DataSaver(training_data_dir, save_training)
 
     def _init_networks(self):
         """Initialize neural networks."""
@@ -530,6 +613,13 @@ class NetworkNode(Node):
                     output = self.sorting_net(image_tensor)
                     prediction = output.numpy()[0]
                     confidence = float(torch.max(output).item())
+
+                # Save training data
+                self.data_saver.save_image_data(
+                    image_tensor, 
+                    request.label,
+                    confidence
+                )
                 
                 # Train network
                 self.sorting_net.train_network(images, labels)
@@ -585,6 +675,13 @@ class NetworkNode(Node):
                 output = self.gesture_net(normalized_sequence)
                 prediction = float(output.item())
                 confidence = float(output.item())
+
+            # Save training data
+            self.data_saver.save_gesture_data(
+                self.last_inference_sequence,
+                request.label,
+                confidence
+            )
 
             # Get balanced training data
             sequences, labels = self._balance_data(
