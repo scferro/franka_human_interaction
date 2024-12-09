@@ -1,6 +1,9 @@
 # Request
 int32 label              # Label for training
+float32 confidence        # Network confidence
+float32 prediction        # Network prediction
 ---
 # Response
 float32 prediction       # Network prediction
+float32 confidence        # Network confidence
 string prediction_id     # Unique ID for tracking prediction feedback

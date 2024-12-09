@@ -101,8 +101,10 @@ class NetworkTrainingNode(Node):
         self.waiting_for_gesture = False
         
         # Prediction tracking
-        self.current_sorting_prediction = None
-        self.current_gesture_prediction = None
+        self.current_predictions = {
+            'sorting': {'prediction': None, 'confidence': None, 'id': None},
+            'gesture': {'prediction': None, 'confidence': None, 'id': None}
+        }
 
     def _init_display(self):
         """Initialize display thread if needed."""
@@ -151,15 +153,25 @@ class NetworkTrainingNode(Node):
             if future.result() is not None:
                 result = future.result()
                 
+                # Store all prediction information
+                self.current_predictions['gesture'] = {
+                    'prediction': result.prediction,
+                    'confidence': result.confidence,
+                    'id': result.prediction_id
+                }
+                
                 if self.gesture_network_type == GestureNetworkType.COMPLEX:
-                    # For complex network, store predicted class (0-3)
-                    self.current_gesture_prediction = int(result.prediction)
-                    self.get_logger().info(f'Gesture prediction: {self.current_gesture_prediction}')
-                else:
-                    # For binary network, store probability value
-                    self.current_gesture_prediction = result.prediction
+                    # For complex network, prediction is already the class (0-3)
                     self.get_logger().info(
-                        f'Binary gesture prediction: {self.current_gesture_prediction:.2f}')
+                        f'Gesture prediction: {result.prediction} '
+                        f'(confidence: {result.confidence:.2f}, ID: {result.prediction_id})'
+                    )
+                else:
+                    # For binary network, prediction is a probability
+                    self.get_logger().info(
+                        f'Binary gesture prediction: {result.prediction:.2f} '
+                        f'(confidence: {result.confidence:.2f}, ID: {result.prediction_id})'
+                    )
                 return True
             else:
                 self.get_logger().error('Failed to get gesture prediction')
@@ -176,6 +188,7 @@ class NetworkTrainingNode(Node):
 
         request = SortNet.Request()
         request.image = self.current_ros_msg
+        request.index = -1  # Default value when not working with indexed blocks
         
         try:
             future = self.get_sorting_prediction_client.call_async(request)
@@ -183,8 +196,18 @@ class NetworkTrainingNode(Node):
             
             if future.result() is not None:
                 result = future.result()
-                self.current_sorting_prediction = int(result.prediction)
-                self.get_logger().info(f'Sorting prediction: {self.current_sorting_prediction}')
+                
+                # Store all prediction information
+                self.current_predictions['sorting'] = {
+                    'prediction': int(result.prediction),
+                    'confidence': result.confidence,
+                    'id': result.prediction_id
+                }
+                
+                self.get_logger().info(
+                    f'Sorting prediction: {result.prediction} '
+                    f'(confidence: {result.confidence:.2f}, ID: {result.prediction_id})'
+                )
                 return True
             else:
                 self.get_logger().error('Failed to get sorting prediction')
@@ -192,6 +215,7 @@ class NetworkTrainingNode(Node):
                 
         except Exception as e:
             self.get_logger().error(f'Error getting sorting prediction: {str(e)}')
+            return False
             return False
 
     def human_input_callback(self, msg):
@@ -247,6 +271,12 @@ class NetworkTrainingNode(Node):
         request.image = self.current_ros_msg
         request.label = label
 
+        # Use the confidence from the prediction if available
+        if self.current_predictions['sorting']['confidence'] is not None:
+            request.confidence = self.current_predictions['sorting']['confidence']
+        else:
+            request.confidence = 0.0
+
         try:
             self.get_logger().info(f"Sending training request with label {label}")
             future = self.train_sorting_client.call_async(request)
@@ -275,6 +305,12 @@ class NetworkTrainingNode(Node):
         """Train the gesture network with new label."""
         request = GestNet.Request()
         request.label = label
+
+        # Use the confidence from the prediction if available
+        if self.current_predictions['gesture']['confidence'] is not None:
+            request.confidence = self.current_predictions['gesture']['confidence']
+        else:
+            request.confidence = 0.0
         
         try:
             self.get_logger().info(f"Sending gesture training request with label {label}")
@@ -291,7 +327,6 @@ class NetworkTrainingNode(Node):
     def process_iteration(self):
         """Process one training iteration based on current mode."""
         if self.waiting_for_input:
-            # Add small sleep to prevent CPU spinning
             time.sleep(0.1)
             return
             
@@ -319,8 +354,10 @@ class NetworkTrainingNode(Node):
             self.get_logger().info("Getting sorting prediction")
             if self.get_sorting_prediction():
                 self.waiting_for_input = True
+                sort_pred = self.current_predictions['sorting']
                 self.notify_user(
-                    f"Predicted class: {self.current_sorting_prediction}\n"
+                    f"Predicted class: {sort_pred['prediction']}\n"
+                    f"Confidence: {sort_pred['confidence']:.2f}\n"
                     f"Enter correct class (0-3)"
                 )
                 self.get_logger().info("Waiting for human input")
@@ -331,17 +368,20 @@ class NetworkTrainingNode(Node):
             self.get_logger().info("Processing gesture training iteration")
             if self.get_gesture_prediction():
                 self.waiting_for_input = True
+                gest_pred = self.current_predictions['gesture']
+                
                 if self.gesture_network_type == GestureNetworkType.COMPLEX:
                     self.notify_user(
-                        f"Predicted class: {self.current_gesture_prediction}\n"
+                        f"Predicted class: {gest_pred['prediction']}\n"
+                        f"Confidence: {gest_pred['confidence']:.2f}\n"
                         f"Enter correct class (0-3)"
                     )
                 else:
-                    pred_text = "1" if self.current_gesture_prediction >= 0.5 else "0"
-                    prob_text = f"{self.current_gesture_prediction:.2f}"
+                    pred_class = "1" if gest_pred['prediction'] >= 0.5 else "0"
                     self.notify_user(
-                        f'Binary prediction: {pred_text} (confidence: {prob_text})\n'
-                        f'Enter correct class (0 or 1)'
+                        f"Binary prediction: {pred_class}\n"
+                        f"Confidence: {gest_pred['confidence']:.2f}\n"
+                        f"Enter correct class (0 or 1)"
                     )
                 self.get_logger().info("Waiting for human input")
             else:
@@ -351,9 +391,13 @@ class NetworkTrainingNode(Node):
             self.get_logger().info("Processing combined training iteration")
             if self.get_sorting_prediction() and self.get_gesture_prediction():
                 self.waiting_for_input = True
+                sort_pred = self.current_predictions['sorting']
+                gest_pred = self.current_predictions['gesture']
                 self.notify_user(
-                    f"Sorting prediction: {self.current_sorting_prediction}\n"
-                    f"Gesture prediction: {self.current_gesture_prediction}\n"
+                    f"Sorting prediction: {sort_pred['prediction']}\n"
+                    f"Sorting confidence: {sort_pred['confidence']:.2f}\n"
+                    f"Gesture prediction: {gest_pred['prediction']}\n"
+                    f"Gesture confidence: {gest_pred['confidence']:.2f}\n"
                     f"Enter correct class (0-3)"
                 )
                 self.get_logger().info("Waiting for human input")

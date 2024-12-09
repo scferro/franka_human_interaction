@@ -50,6 +50,8 @@ class TrainingSample:
     label: int
     network_state: NetworkState
     buffer_state: any  
+    prediction: float
+    confidence: any
 
 class NetworkLogger:
     """Manages all logging operations for network predictions and performance."""
@@ -226,82 +228,104 @@ class NetworkLogger:
                     stats['correction_rate'] = 0.0
                     
             return stats_copy
+        
 class DataSaver:
-    """Manages saving of training data samples."""
+    """Data saver that stores each gesture as an individual file."""
+    
     def __init__(self, base_dir: str, enabled: bool = True):
         self.enabled = enabled
         if not enabled:
             return
             
-        # Create directory structure
+        # Create base directory structure
         self.base_dir = Path(base_dir)
         self.image_dir = self.base_dir / 'images'
         self.gesture_dir = self.base_dir / 'gestures'
         
-        # Ensure directories exist
-        self.image_dir.mkdir(parents=True, exist_ok=True)
-        self.gesture_dir.mkdir(parents=True, exist_ok=True)
+        # Create subdirectories for different gesture types
+        self.binary_gesture_dir = self.gesture_dir / 'binary'
+        self.complex_gesture_dir = self.gesture_dir / 'complex'
         
-        # Create timestamped files for this session
+        # Ensure all directories exist
+        for directory in [
+            self.image_dir, 
+            self.binary_gesture_dir,
+            self.complex_gesture_dir
+        ]:
+            directory.mkdir(parents=True, exist_ok=True)
+        
+        # Create timestamped image file for this session
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.image_file = self.image_dir / f"image_data_{timestamp}.csv"
-        self.gesture_file = self.gesture_dir / f"gesture_data_{timestamp}.csv"
         
-        # Initialize files with headers
-        self._init_files()
+        # Initialize image file with headers
+        self._init_image_file()
         
-    def _init_files(self):
-        """Initialize CSV files with headers."""
+    def _init_image_file(self):
+        """Initialize the image CSV file with headers."""
         image_headers = ['timestamp', 'label', 'confidence', 'filename']
-        gesture_headers = ['timestamp', 'label', 'confidence', 'sequence_data']
-        
         with open(self.image_file, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(image_headers)
-            
-        with open(self.gesture_file, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(gesture_headers)
-    
+
     def save_image_data(self, image_tensor: torch.Tensor, label: int, 
-                       confidence: float = None):
-        """Save image data and metadata."""
+                   confidence: float = None):
+        """Save image data as PNG file."""
         if not self.enabled:
             return
             
         try:
+            # Create a timestamp-based filename
             timestamp = datetime.now().isoformat()
-            
-            # Save image tensor as numpy array
-            image_name = f"image_{timestamp}.npy"
+            image_name = f"image_{timestamp}.png"
             image_path = self.image_dir / image_name
-            np.save(image_path, image_tensor.numpy())
             
-            # Save metadata to CSV
-            with open(self.image_file, 'a', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([timestamp, label, confidence, image_name])
+            # Convert tensor to image format
+            # First denormalize the tensor - reverse the normalization done in preprocessing
+            denorm = transforms.Normalize(
+                mean=[-0.485/0.229, -0.456/0.224, -0.406/0.225],
+                std=[1/0.229, 1/0.224, 1/0.225]
+            )
+            denormalized = denorm(image_tensor[0])  # Remove batch dimension
+            
+            # Convert to PIL Image and save as PNG
+            image = transforms.ToPILImage()(denormalized)
+            image.save(image_path)
                 
         except Exception as e:
             print(f"Error saving image data: {e}")
     
-    def save_gesture_data(self, sequence: list, label: int, 
-                         confidence: float = None):
-        """Save gesture sequence data and metadata."""
+    def save_gesture_data(self, sequence: list, label: int, confidence: float = None):
+        """Save gesture sequence data as individual CSV files."""
         if not self.enabled:
             return
             
         try:
+            # Generate timestamp for unique identification
             timestamp = datetime.now().isoformat()
             
-            # Convert sequence to string representation
-            sequence_str = str(sequence)
+            # Determine gesture type and directory
+            is_binary = label in [0, 1]
+            base_dir = self.binary_gesture_dir if is_binary else self.complex_gesture_dir
             
-            # Save to CSV
-            with open(self.gesture_file, 'a', newline='') as f:
+            # Create filename for this specific gesture
+            gesture_file = base_dir / f"gesture_{timestamp}.csv"
+            
+            # Convert sequence to numpy array for easier handling
+            sequence_array = np.array(sequence)
+            
+            # Save sequence data as CSV with metadata in header row
+            with open(gesture_file, 'w', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow([timestamp, label, confidence, sequence_str])
-                
+                # Write metadata as header
+                writer.writerow(['timestamp', 'label', 'confidence', 'sequence_length', 'feature_count'])
+                writer.writerow([timestamp, label, confidence, len(sequence), sequence_array.shape[1]])
+                # Write column headers for the sequence data
+                writer.writerow(['timestamp'] + [f'feature_{i}' for i in range(sequence_array.shape[1])])
+                # Write the actual sequence data
+                for i, datapoint in enumerate(sequence_array):
+                    writer.writerow([f't{i}'] + list(datapoint))
+                    
         except Exception as e:
             print(f"Error saving gesture data: {e}")
 
@@ -441,20 +465,39 @@ class NetworkNode(Node):
         if network_type == 'sorting':
             network = self.sorting_net
             buffer_state = [list(buffer) for buffer in self.sorting_class_buffers]
+            # For sorting network, prediction is a list of class probabilities
+            with torch.no_grad():
+                output = network(input_data)
+                prediction = output.numpy()[0]
+                confidence = float(torch.max(output).item())
+
         elif network_type == 'gesture':
             network = self.gesture_net
             buffer_state = (list(self.gesture_class_0), list(self.gesture_class_1))
+            # For gesture network, prediction is a single value
+            with torch.no_grad():
+                output = network(self.normalize_sequence(self.process_sensor_data(input_data)))
+                prediction = float(output.item())
+                confidence = float(output.item())
+
         else:  # complex_gesture
             network = self.complex_gesture_net
             buffer_state = [list(buffer) for buffer in self.complex_gesture_buffers]
-            
+            # For complex gesture network, prediction is a list of class probabilities
+            with torch.no_grad():
+                output = network(self.normalize_sequence(self.process_sensor_data(input_data)))
+                prediction = output.numpy()[0]
+                confidence = float(torch.max(output).item())
+                
         network_state = NetworkState.from_network(network)
         
         self.last_training_samples[network_type] = TrainingSample(
             input_data=copy.deepcopy(input_data),
             label=label,
             network_state=network_state,
-            buffer_state=buffer_state
+            buffer_state=buffer_state,
+            prediction=prediction,  
+            confidence=confidence 
         )
 
     def _restore_training_state(self, network_type: str) -> Optional[TrainingSample]:
@@ -503,17 +546,24 @@ class NetworkNode(Node):
                 prediction = output.numpy()[0]
                 confidence = float(torch.max(output).item())
             
+            # Generate unique prediction ID using timestamp and random suffix
+            prediction_id = f"sort_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{random.randint(1000, 9999)}"
+            
             response.prediction = float(np.argmax(prediction))
+            response.confidence = confidence
+            response.prediction_id = prediction_id
             
             self.get_logger().info(
                 f'Sorting prediction: {response.prediction} '
-                f'(confidence: {confidence:.3f})'
+                f'(confidence: {confidence:.3f}, ID: {prediction_id})'
             )
             return response
             
         except Exception as e:
             self.get_logger().error(f'Error in sorting prediction: {str(e)}')
             response.prediction = -1.0
+            response.confidence = 0.0
+            response.prediction_id = ""
             return response
 
     def get_gesture_prediction_callback(self, request, response):
@@ -521,11 +571,15 @@ class NetworkNode(Node):
         try:
             if len(self.combined_sequence) < self.sequence_length:
                 response.prediction = -1.0
+                response.confidence = 0.0
+                response.prediction_id = ""
                 return response
 
             sequence_tensor = self.process_sensor_data(self.combined_sequence)
             if sequence_tensor is None:
                 response.prediction = -1.0
+                response.confidence = 0.0
+                response.prediction_id = ""
                 return response
 
             normalized_sequence = self.normalize_sequence(sequence_tensor)
@@ -535,11 +589,16 @@ class NetworkNode(Node):
                 prediction = float(output.item())
                 confidence = float(output.item())
             
+            # Generate unique prediction ID
+            prediction_id = f"gest_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{random.randint(1000, 9999)}"
+            
             response.prediction = prediction
+            response.confidence = confidence
+            response.prediction_id = prediction_id
             
             self.get_logger().info(
                 f'Binary gesture prediction: {prediction:.3f} '
-                f'(confidence: {confidence:.3f})'
+                f'(confidence: {confidence:.3f}, ID: {prediction_id})'
             )
             
             self.last_inference_sequence = self.combined_sequence.copy()
@@ -548,6 +607,8 @@ class NetworkNode(Node):
         except Exception as e:
             self.get_logger().error(f'Error in gesture prediction: {str(e)}')
             response.prediction = -1.0
+            response.confidence = 0.0
+            response.prediction_id = ""
             return response
 
     def get_complex_gesture_prediction_callback(self, request, response):
@@ -555,11 +616,15 @@ class NetworkNode(Node):
         try:
             if len(self.combined_sequence) < self.sequence_length:
                 response.prediction = -1.0
+                response.confidence = 0.0
+                response.prediction_id = ""
                 return response
 
             sequence_tensor = self.process_sensor_data(self.combined_sequence)
             if sequence_tensor is None:
                 response.prediction = -1.0
+                response.confidence = 0.0
+                response.prediction_id = ""
                 return response
 
             normalized_sequence = self.normalize_sequence(sequence_tensor)
@@ -569,11 +634,16 @@ class NetworkNode(Node):
                 prediction = output.numpy()[0]
                 confidence = float(torch.max(output).item())
             
+            # Generate unique prediction ID
+            prediction_id = f"cgest_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{random.randint(1000, 9999)}"
+            
             response.prediction = float(np.argmax(prediction))
+            response.confidence = confidence
+            response.prediction_id = prediction_id
             
             self.get_logger().info(
                 f'Complex gesture prediction: {response.prediction} '
-                f'(confidence: {confidence:.3f})'
+                f'(confidence: {confidence:.3f}, ID: {prediction_id})'
             )
             
             self.last_inference_sequence = self.combined_sequence.copy()
@@ -582,6 +652,8 @@ class NetworkNode(Node):
         except Exception as e:
             self.get_logger().error(f'Error in complex gesture prediction: {str(e)}')
             response.prediction = -1.0
+            response.confidence = 0.0
+            response.prediction_id = ""
             return response
 
     def train_sorting_callback(self, request, response):
@@ -606,32 +678,27 @@ class NetworkNode(Node):
             self.get_logger().info(f"Current sorting buffer sizes: {buffer_sizes}")
             
             # Get balanced training data
-            images, labels = self._balance_multi_class_data(
-                self.sorting_class_buffers)
+            images, labels = self._balance_multi_class_data(self.sorting_class_buffers)
+
+            # Get the stored prediction from the last training sample
+            last_sample = self.last_training_samples['sorting']
             
             # Train if we have images
             if images:
-                # Make prediction before training for logging
-                with torch.no_grad():
-                    output = self.sorting_net(image_tensor)
-                    prediction = output.numpy()[0]
-                    confidence = float(torch.max(output).item())
-
-                # Save training data
+                # Save training data using provided confidence
                 self.data_saver.save_image_data(
                     image_tensor, 
                     request.label,
-                    confidence
+                    last_sample.confidence
                 )
                 
                 # Train network
                 self.sorting_net.train_network(images, labels)
                 
-                # Log prediction and feedback
                 self.logger.log_prediction_and_feedback(
                     'complex_sorting',
-                    prediction,
-                    confidence,
+                    last_sample.prediction, 
+                    last_sample.confidence,
                     request.label
                 )
                 
@@ -639,12 +706,19 @@ class NetworkNode(Node):
                     f"Trained sorting network on {len(images)} images"
                 )
             
+            # Generate prediction ID for response
+            prediction_id = f"train_sort_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{random.randint(1000, 9999)}"
+            
             response.prediction = 0.0
+            response.confidence = request.confidence
+            response.prediction_id = prediction_id
             return response
             
         except Exception as e:
             self.get_logger().error(f"Error training sorting network: {str(e)}")
             response.prediction = -1.0
+            response.confidence = 0.0
+            response.prediction_id = ""
             return response
 
     def train_gesture_callback(self, request, response):
@@ -653,16 +727,19 @@ class NetworkNode(Node):
             if len(self.last_inference_sequence) < self.sequence_length:
                 self.get_logger().warn('Not enough data points for training')
                 response.prediction = -1.0
+                response.confidence = 0.0
+                response.prediction_id = ""
                 return response
 
             # Cache current state
             self._cache_training_state('gesture', self.last_inference_sequence, request.label)
 
             # Process sequence
-            sequence_tensor = self.process_sensor_data(
-                self.last_inference_sequence)
+            sequence_tensor = self.process_sensor_data(self.last_inference_sequence)
             if sequence_tensor is None:
                 response.prediction = -1.0
+                response.confidence = 0.0
+                response.prediction_id = ""
                 return response
 
             normalized_sequence = self.normalize_sequence(sequence_tensor)
@@ -673,17 +750,13 @@ class NetworkNode(Node):
             else:
                 self.gesture_class_1.append(normalized_sequence)
 
-            # Get current prediction for logging
-            with torch.no_grad():
-                output = self.gesture_net(normalized_sequence)
-                prediction = float(output.item())
-                confidence = float(output.item())
+            last_sample = self.last_training_samples['gesture']
 
-            # Save training data
+            # Save training data using stored prediction values
             self.data_saver.save_gesture_data(
                 self.last_inference_sequence,
                 request.label,
-                confidence
+                last_sample.confidence
             )
 
             # Get balanced training data
@@ -696,11 +769,11 @@ class NetworkNode(Node):
                 # Train network
                 self.gesture_net.train_network(sequences, labels)
                 
-                # Log prediction and feedback
+                # Log prediction and feedback using provided confidence
                 self.logger.log_prediction_and_feedback(
                     'binary_gesture',
-                    prediction,
-                    confidence,
+                    last_sample.prediction,  # Use stored prediction
+                    last_sample.confidence,  # Use stored confidence
                     request.label
                 )
                 
@@ -708,32 +781,43 @@ class NetworkNode(Node):
                     f'Trained gesture network on {len(sequences)} sequences'
                 )
 
+            # Generate prediction ID for response
+            prediction_id = f"train_gest_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{random.randint(1000, 9999)}"
+            
             response.prediction = 0.0
+            response.confidence = request.confidence
+            response.prediction_id = prediction_id
             return response
 
         except Exception as e:
             self.get_logger().error(f'Error in train_gesture: {str(e)}')
             response.prediction = -1.0
+            response.confidence = 0.0
+            response.prediction_id = ""
             return response
-
+        
     def train_complex_gesture_callback(self, request, response):
         """Handle training requests for the complex gesture network."""
         try:
             if len(self.last_inference_sequence) < self.sequence_length:
                 self.get_logger().warn('Not enough data points for training')
                 response.prediction = -1.0
+                response.confidence = 0.0
+                response.prediction_id = ""
                 return response
 
             # Cache current state
             self._cache_training_state('complex_gesture', 
-                                     self.last_inference_sequence, 
-                                     request.label)
+                                    self.last_inference_sequence, 
+                                    request.label)
 
             # Process sequence
             sequence_tensor = self.process_sensor_data(
                 self.last_inference_sequence)
             if sequence_tensor is None:
                 response.prediction = -1.0
+                response.confidence = 0.0
+                response.prediction_id = ""
                 return response
 
             normalized_sequence = self.normalize_sequence(sequence_tensor)
@@ -746,11 +830,21 @@ class NetworkNode(Node):
             else:
                 raise ValueError(f"Invalid class index: {class_idx}")
 
-            # Get current prediction for logging
-            with torch.no_grad():
-                output = self.complex_gesture_net(normalized_sequence)
-                prediction = output.numpy()[0]
-                confidence = float(torch.max(output).item())
+            # Get the stored prediction from the last training sample
+            last_sample = self.last_training_samples['complex_gesture']
+            if last_sample is None:
+                self.get_logger().warn('No previous prediction found')
+                response.prediction = -1.0
+                response.confidence = 0.0
+                response.prediction_id = ""
+                return response
+
+            # Save training data using stored prediction values
+            self.data_saver.save_gesture_data(
+                self.last_inference_sequence,
+                request.label,
+                last_sample.confidence
+            )
 
             # Get balanced training data
             sequences, labels = self._balance_multi_class_data(
@@ -760,11 +854,11 @@ class NetworkNode(Node):
                 # Train network
                 self.complex_gesture_net.train_network(sequences, labels)
                 
-                # Log prediction and feedback
+                # Log prediction and feedback using stored values
                 self.logger.log_prediction_and_feedback(
                     'complex_gesture',
-                    prediction,
-                    confidence,
+                    last_sample.prediction,  # Use stored prediction
+                    last_sample.confidence,  # Use stored confidence
                     request.label
                 )
                 
@@ -772,13 +866,20 @@ class NetworkNode(Node):
                     f'Trained complex gesture network on {len(sequences)} sequences'
                 )
 
+            # Generate prediction ID for response
+            prediction_id = f"train_cgest_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{random.randint(1000, 9999)}"
+            
             response.prediction = 0.0
+            response.confidence = request.confidence
+            response.prediction_id = prediction_id
             return response
 
         except Exception as e:
             self.get_logger().error(
                 f'Error in train_complex_gesture: {str(e)}')
             response.prediction = -1.0
+            response.confidence = 0.0
+            response.prediction_id = ""
             return response
 
     def correct_sorting_callback(self, request, response):
@@ -931,7 +1032,8 @@ class NetworkNode(Node):
     def save_gesture_callback(self, request, response):
         """Save binary gesture network to file."""
         try:
-            timestamp = self.get_clock().now().to_msg().sec
+            day_offset = -18
+            timestamp = self.get_clock().now().to_msg().sec + (day_offset * 86400)
             
             if request.filename:
                 filepath = f"{self.save_dir}/{request.filename}"
@@ -1130,9 +1232,8 @@ class NetworkNode(Node):
             mod51_features = mod51_data[:, 1:]
             
             combined_features = np.hstack((self.mod48_buffer, mod51_features))
-            current_point = combined_features[0]
             
-            self.combined_sequence.append(current_point)
+            self.combined_sequence.append(combined_features)
 
             if len(self.combined_sequence) > self.sequence_length:
                 self.combined_sequence = self.combined_sequence[-self.sequence_length:]

@@ -2,7 +2,10 @@
 sensor_msgs/Image image    # Image for training/prediction
 int32 label               # Label for training (ignored for prediction)
 int32 index             # Index for working with indexed blocks
+float32 confidence        # Network confidence
+float32 prediction        # Network prediction
 ---
 # Response
 float32 prediction        # Network prediction
+float32 confidence        # Network confidence
 string prediction_id      # Unique ID for tracking prediction feedback
