@@ -101,6 +101,13 @@ def generate_launch_description():
         description='Size of the training buffer'
     )
 
+    # Network configuration arguments
+    buffer_size_gest_arg = DeclareLaunchArgument(
+        'buffer_size_gest',
+        default_value='100',
+        description='Size of the training buffer'
+    )
+
     sequence_length_arg = DeclareLaunchArgument(
         'sequence_length',
         default_value='20',
@@ -165,6 +172,7 @@ def generate_launch_description():
             
             # Network configuration
             'buffer_size': LaunchConfiguration('buffer_size'),
+            'buffer_size_gest': LaunchConfiguration('buffer_size_gest'),
             'sequence_length': LaunchConfiguration('sequence_length'),
             
             # Data saving configuration
@@ -226,6 +234,7 @@ def generate_launch_description():
         
         # Configuration
         buffer_size_arg,
+        buffer_size_gest_arg,
         sequence_length_arg,
         
         # Nodes and includes

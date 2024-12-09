@@ -295,7 +295,8 @@ class DataSaver:
         except Exception as e:
             print(f"Error saving image data: {e}")
     
-    def save_gesture_data(self, sequence: list, label: int, confidence: float = None):
+    def save_gesture_data(self, sequence: list, label: int, confidence: float = None, 
+                         gesture_type: str = 'binary'):
         """Save gesture sequence data as individual CSV files."""
         if not self.enabled:
             return
@@ -304,9 +305,8 @@ class DataSaver:
             # Generate timestamp for unique identification
             timestamp = datetime.now().isoformat()
             
-            # Determine gesture type and directory
-            is_binary = label in [0, 1]
-            base_dir = self.binary_gesture_dir if is_binary else self.complex_gesture_dir
+            # Determine gesture type and directory based on the gesture_type parameter
+            base_dir = self.binary_gesture_dir if gesture_type == 'binary' else self.complex_gesture_dir
             
             # Create filename for this specific gesture
             gesture_file = base_dir / f"gesture_{timestamp}.csv"
@@ -351,6 +351,7 @@ class NetworkNode(Node):
     def _init_parameters(self):
         """Initialize all ROS parameters."""
         self.declare_parameter('buffer_size', 25)
+        self.declare_parameter('buffer_size_gest', 100)
         self.declare_parameter('sequence_length', 20)
         self.declare_parameter('sorting_model_path', '')
         self.declare_parameter('gesture_model_path', '')
@@ -361,6 +362,7 @@ class NetworkNode(Node):
         self.declare_parameter('training_data_dir', '/home/user/training_data')
         
         self.buffer_size = self.get_parameter('buffer_size').value
+        self.buffer_size_gest = self.get_parameter('buffer_size_gest').value
         self.sequence_length = self.get_parameter('sequence_length').value
         self.sorting_model_path = self.get_parameter('sorting_model_path').value
         self.gesture_model_path = self.get_parameter('gesture_model_path').value
@@ -404,11 +406,11 @@ class NetworkNode(Node):
             deque(maxlen=self.buffer_size) for _ in range(4)
         ]
         
-        self.gesture_class_0 = deque(maxlen=self.buffer_size)
-        self.gesture_class_1 = deque(maxlen=self.buffer_size)
+        self.gesture_class_0 = deque(maxlen=self.buffer_size_gest)
+        self.gesture_class_1 = deque(maxlen=self.buffer_size_gest)
         
         self.complex_gesture_buffers = [
-            deque(maxlen=self.buffer_size) for _ in range(4)
+            deque(maxlen=self.buffer_size_gest) for _ in range(4)
         ]
         
         self.mod48_buffer = None
@@ -512,11 +514,11 @@ class NetworkNode(Node):
                                         for buffer in sample.buffer_state]
         elif network_type == 'gesture':
             network = self.gesture_net
-            self.gesture_class_0 = deque(sample.buffer_state[0], maxlen=self.buffer_size)
-            self.gesture_class_1 = deque(sample.buffer_state[1], maxlen=self.buffer_size)
+            self.gesture_class_0 = deque(sample.buffer_state[0], maxlen=self.buffer_size_gest)
+            self.gesture_class_1 = deque(sample.buffer_state[1], maxlen=self.buffer_size_gest)
         else:  # complex_gesture
             network = self.complex_gesture_net
-            self.complex_gesture_buffers = [deque(buffer, maxlen=self.buffer_size) 
+            self.complex_gesture_buffers = [deque(buffer, maxlen=self.buffer_size_gest) 
                                           for buffer in sample.buffer_state]
             
         sample.network_state.apply_to_network(network)
@@ -843,7 +845,8 @@ class NetworkNode(Node):
             self.data_saver.save_gesture_data(
                 self.last_inference_sequence,
                 request.label,
-                last_sample.confidence
+                last_sample.confidence,
+                "complex"
             )
 
             # Get balanced training data
