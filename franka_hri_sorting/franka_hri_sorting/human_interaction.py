@@ -469,7 +469,7 @@ class HumanInteraction(Node):
         valid_ratio = len(valid_depths) / (w * h)
         
         if len(valid_depths) > 0 and valid_ratio >= self.min_valid_depth_ratio:
-            median_depth = np.median(valid_depths) / 1000.0  # Convert to meters
+            median_depth = np.mean(valid_depths) / 1000.0  # Convert to meters
             self.get_logger().debug(f'Region depth: {median_depth:.3f}m (valid ratio: {valid_ratio:.2f})')
             return median_depth
         

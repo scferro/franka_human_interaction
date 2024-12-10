@@ -314,7 +314,7 @@ private:
       scan_overhead_cli->async_send_request(request, scan_callback);
 
       // Wait for initial scan with timeout
-      if (scan_future_result.wait_for(std::chrono::seconds(5)) == std::future_status::timeout) {
+      if (scan_future_result.wait_for(std::chrono::seconds(10)) == std::future_status::timeout) {
           RCLCPP_ERROR(this->get_logger(), "Initial scan failed - timeout");
           return;
       }
@@ -327,7 +327,7 @@ private:
             double sort_pred = get_network_prediction(i);
             RCLCPP_INFO(this->get_logger(), "Sort prediction: %f", sort_pred);
             
-            const double CONFIDENCE_THRESHOLD = 0.8;
+            const double CONFIDENCE_THRESHOLD = 0.7;
             int predicted_category = static_cast<int>(sort_pred);
             bool high_confidence = (sort_pred - predicted_category) > CONFIDENCE_THRESHOLD;
             int final_category;
@@ -394,7 +394,7 @@ private:
         }
     }
     
-    move_to_pose(overhead_scan_pose, planning_time, vel_factor, accel_factor);
+    move_to_joints(home_joint_positions);
 }
 
 void update_piles_callback(
@@ -453,10 +453,11 @@ void update_piles_callback(
 
     // Calculate the new position for the block
     geometry_msgs::msg::Pose new_pose = *target_pile_start;
+    auto new_block = block_markers.markers[request->block_index];
+    new_pose.position.z = new_block.scale.z / 2;
     if (!target_pile->empty()) {
         // Get the top block's position and add height
         auto top_block = block_markers.markers[target_pile->back()];
-        auto new_block = block_markers.markers[request->block_index];
         new_pose.position.z = top_block.pose.position.z + (top_block.scale.z / 2) + (new_block.scale.z / 2);
     }
 
@@ -825,7 +826,7 @@ geometry_msgs::msg::PoseStamped get_pile_pose(int category) {
       auto request = std::make_shared<franka_hri_interfaces::srv::SortNet::Request>();
       request->index = index;
 
-      while (!get_network_prediction_client->wait_for_service(std::chrono::seconds(1)))
+      while (!get_network_prediction_client->wait_for_service(std::chrono::seconds(5)))
       {
           if (!rclcpp::ok())
           {
