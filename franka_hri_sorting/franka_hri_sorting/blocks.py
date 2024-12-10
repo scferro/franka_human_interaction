@@ -177,14 +177,6 @@ class Blocks(Node):
                     
                     # Call training service with timeout
                     future = self.train_sorting_client.call_async(req)
-                    try:
-                        await rclpy.task.Future.wait_for(future, timeout=5.0)
-                    except TimeoutError:
-                        self.get_logger().warn("Training request timed out")
-                        continue
-                    except Exception as e:
-                        self.get_logger().error(f"Error in training request: {str(e)}")
-                        continue
                     
                 except Exception as e:
                     self.get_logger().error(f"Error training network: {str(e)}")
@@ -219,14 +211,6 @@ class Blocks(Node):
                 req.label = label
                 
                 future = self.train_sorting_client.call_async(req)
-                try:
-                    await rclpy.task.Future.wait_for(future, timeout=5.0)
-                except TimeoutError:
-                    self.get_logger().warn("Training request timed out")
-                    continue
-                except Exception as e:
-                    self.get_logger().error(f"Error in training request: {str(e)}")
-                    continue
                     
             except Exception as e:
                 self.get_logger().error(f"Error training network: {str(e)}")
@@ -300,7 +284,7 @@ class Blocks(Node):
 
         return image_tensor
 
-    def update_markers_callback(self, request, response):
+    async def update_markers_callback(self, request, response):
         # Extract markers and indices from request
         self.get_logger().info("Received update_markers request")
         new_markers = request.input_markers.markers
@@ -395,22 +379,27 @@ class Blocks(Node):
         # Create a binary mask based on the color range
         mask = cv2.inRange(hsv_image, lower_color, upper_color)
 
-        # Find the contours in the mask
+        # Use blurring to smooth the color transitions
+        mask = cv2.GaussianBlur(mask, (9, 9), 0)
+
+        # Perform morphological operations to merge nearby regions
+        kernel = np.ones((7,7), np.uint8)
+        kernel2 = np.ones((13,13), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)  # Close small gaps
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel2)   # Remove noise
+
+        # Find contours on the final mask
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        # Draw the contours on the mask with white color
+        # Draw the contours on the mask
         mask_image = np.zeros_like(image)
         cv2.drawContours(mask_image, contours, -1, (255, 255, 255), -1)
 
-        # Use opening to remove noise
-        kernel = np.ones((7,7), np.uint8)
-        open_mask = cv2.morphologyEx(mask_image, cv2.MORPH_OPEN, kernel)
-        
         # Apply the mask to the original image
-        masked_image = cv2.bitwise_and(image, open_mask)
+        masked_image = cv2.bitwise_and(image, mask_image)
 
-        # Find the contours in the mask
-        color_mask = cv2.cvtColor(open_mask, cv2.COLOR_BGR2GRAY)
+        # Convert mask to grayscale for contour extraction
+        color_mask = cv2.cvtColor(mask_image, cv2.COLOR_BGR2GRAY)
         contours_out, _ = cv2.findContours(color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         return contours_out, masked_image

@@ -317,7 +317,7 @@ class ComplexGestureNet(nn.Module):
         self.fc3 = nn.Linear(64, num_classes)
         self.softmax = nn.Softmax(dim=1)
 
-        self.lr_init = 0.0005
+        self.lr_init = 0.00025
         self.lr_decay = 0.99
         
         self.criterion = nn.CrossEntropyLoss()

@@ -2,7 +2,7 @@ import rclpy
 from rclpy.node import Node
 from tf2_ros import TransformListener, Buffer, TransformBroadcaster, StaticTransformBroadcaster
 import tf_transformations
-from geometry_msgs.msg import TransformStamped, Pose
+from geometry_msgs.msg import TransformStamped, PointStamped, Pose
 from std_srvs.srv import Trigger
 from sensor_msgs.msg import Image, CameraInfo
 from std_msgs.msg import Bool
@@ -16,7 +16,8 @@ import numpy as np
 import cv2
 import csv
 import os
-from tf2_geometry_msgs import do_transform_pose
+import time
+from tf2_geometry_msgs import do_transform_point
 
 class HumanInteraction(Node):
     def __init__(self):
@@ -28,20 +29,34 @@ class HumanInteraction(Node):
         self.declare_parameter('camera_info_topic', '/camera/d435i/aligned_depth_to_color/camera_info')
         self.declare_parameter('depth_topic', '/camera/d435i/aligned_depth_to_color/image_raw')
         self.declare_parameter('color_topic', '/camera/d435i/color/image_raw')
+        self.declare_parameter('visualization_rate', 10.0)  # Hz for visualization updates
+        self.declare_parameter('monitoring_window_size', 100)  # Size in pixels
+        self.declare_parameter('depth_change_threshold', 0.005)  # In meters
+        self.declare_parameter('min_valid_depth_ratio', 0.2)  # Minimum ratio of valid depth pixels
+
+        self.monitoring_window_size = self.get_parameter('monitoring_window_size').value
+        self.depth_change_threshold = self.get_parameter('depth_change_threshold').value
+        self.min_valid_depth_ratio = self.get_parameter('min_valid_depth_ratio').value
         
         # Initialize camera matrix and monitoring state
         self.camera_matrix = None
         self.current_block_info = None
-        self.monitoring_active = False
+        self.monitoring_active = True
         self.monitoring_positions = None
         self.current_block_index = None
         self.block_markers = None
+        self.monitoring_regions = []  # Store current monitoring regions
         
         # Initialize frame storage
         self.last_color_frame = None
         self.last_depth_frame = None 
         self.pre_interaction_color = None
         self.pre_interaction_depth = None
+        
+        # Define visualization colors
+        self.ORIGINAL_COLOR = (0, 0, 255)    # Red for original position
+        self.TARGET_COLOR = (0, 255, 0)      # Green for target positions
+        self.ACTIVE_COLOR = (255, 165, 0)    # Orange for regions with detected changes
         
         # Initialize OpenCV bridge and MediaPipe hands
         self.bridge = CvBridge()
@@ -89,15 +104,21 @@ class HumanInteraction(Node):
 
         self.block_markers_sub = self.create_subscription(
             MarkerArray,
-            'blocks',  # Topic where blocks node publishes markers
+            'blocks',
             self.marker_array_callback,
             10
         )
         
         # Create publishers and service clients
         self.hands_detected_pub = self.create_publisher(Bool, 'hands_detected', 10)
-        self.update_markers_cli = self.create_client(UpdateMarkers, 'update_markers')
-        self.move_block_client = self.create_client(MoveBlock, 'update_block_tracking')
+        self.monitoring_image_pub = self.create_publisher(Image, 'monitoring_visualization', 10)
+
+        self.blocks_callback_group = rclpy.callback_groups.ReentrantCallbackGroup()
+        self.move_block_client = self.create_client(
+            MoveBlock, 
+            'update_piles',
+            callback_group=self.blocks_callback_group,
+            )
         
         # Load calibration if exists
         calibration_file = self.get_parameter('calibration_file').value
@@ -113,10 +134,64 @@ class HumanInteraction(Node):
             self.localize_camera_callback
         )
         
-        # Add transform broadcast timer
+        # Create timers
         self.tf_timer = self.create_timer(0.1, self.broadcast_stored_transform)
+        viz_period = 1.0 / self.get_parameter('visualization_rate').value
+        self.viz_timer = self.create_timer(viz_period, self.publish_visualization)
         
         self.get_logger().info('Human Interaction node initialized')
+
+    def publish_visualization(self):
+        """Publish visualization of monitoring regions."""
+        if self.last_color_frame is None:
+            self.get_logger().debug('No color frame available')
+            return
+            
+        if not self.monitoring_active:
+            self.get_logger().debug('Monitoring not active')
+            return
+            
+        if not self.monitoring_regions:
+            self.get_logger().debug('No monitoring regions available')
+            return
+                
+        try:
+            # Create copy of current frame for visualization
+            viz_frame = self.last_color_frame.copy()
+            
+            # Draw monitoring regions
+            if self.monitoring_regions:
+                # Draw original position (first region) in red
+                region = self.monitoring_regions[0]
+                self.draw_monitoring_region(viz_frame, region, self.ORIGINAL_COLOR, "Original")
+                
+                # Draw target positions in green
+                for i, region in enumerate(self.monitoring_regions[1:], 1):
+                    self.draw_monitoring_region(viz_frame, region, self.TARGET_COLOR, f"Target {i}")
+                    
+                    # If we have depth data, check for changes and highlight active regions
+                    if self.pre_interaction_depth is not None and self.last_depth_frame is not None:
+                        if self.detect_region_change(region, expect_addition=True):
+                            self.draw_monitoring_region(viz_frame, region, self.ACTIVE_COLOR, f"Active {i}")
+            
+            # Convert to ROS message and publish
+            viz_msg = self.bridge.cv2_to_imgmsg(viz_frame, encoding="bgr8")
+            self.monitoring_image_pub.publish(viz_msg)
+            
+        except Exception as e:
+            self.get_logger().error(f'Error publishing visualization: {str(e)}')
+
+    def draw_monitoring_region(self, image, region, color, label):
+        """Draw a single monitoring region with label."""
+        # Draw rectangle
+        pt1 = (region['x'], region['y'])
+        pt2 = (region['x'] + region['width'], region['y'] + region['height'])
+        cv2.rectangle(image, pt1, pt2, color, 2)
+        
+        # Add label above rectangle
+        label_pos = (region['x'], region['y'] - 10)
+        cv2.putText(image, label, label_pos, cv2.FONT_HERSHEY_SIMPLEX, 
+                    0.5, color, 2)
 
     def marker_array_callback(self, msg):
         """Store the current marker array state."""
@@ -148,7 +223,21 @@ class HumanInteraction(Node):
         self.current_block_info = msg
         self.current_block_index = msg.last_block_index
         self.monitoring_active = True
+        
+        # Add debug logging
+        self.get_logger().info('Received block placement info')
+        
         self.monitoring_positions = self.transform_positions_to_camera(msg)
+        if self.monitoring_positions:
+            # Log transformed positions
+            self.get_logger().info(f'Transformed {len(self.monitoring_positions)} positions to camera frame')
+            
+            self.monitoring_regions = self.get_monitoring_regions(self.monitoring_positions)
+            # Log created regions
+            self.get_logger().info(f'Created {len(self.monitoring_regions)} monitoring regions')
+        else:
+            self.get_logger().warn('Failed to transform positions to camera frame')
+        
         self.get_logger().info(f'Starting block monitoring for block {self.current_block_index}')
 
     def check_for_hands(self):
@@ -173,6 +262,7 @@ class HumanInteraction(Node):
         else:
             if self.pre_interaction_color is not None:
                 # Hands were present but now gone - check for changes
+                time.sleep(1)
                 self.detect_block_movement()
                 self.pre_interaction_color = None
                 self.pre_interaction_depth = None
@@ -180,62 +270,101 @@ class HumanInteraction(Node):
                 self.get_logger().info('Hands removed - checking for block movement')
 
     def transform_positions_to_camera(self, block_info):
-        """Transform world frame positions to camera frame coordinates."""
+        """Transform world frame positions to camera optical frame coordinates."""
         transformed_positions = []
         
         try:
-            # Get transform from world to camera
+            # Get transform from world to camera optical frame
+            # We lookup the transform in the opposite direction of our desired transformation
+            # because we'll apply it to points in the world frame to get camera frame points
             transform = self.tf_buffer.lookup_transform(
-                'd435i_link',
-                'world',
-                rclpy.time.Time()
+                'd435i_color_optical_frame',  # Target frame (where we want points)
+                'world',                      # Source frame (where points start)
+                self.get_clock().now()        # Get latest transform
             )
             
-            # Transform each position
+            # Transform each position from the block info message
+            # The block info contains poses in world frame coordinates
             poses_to_transform = [block_info.last_block_pose] + list(block_info.next_positions)
+            
             for pose in poses_to_transform:
-                pose_stamped = Pose()
-                pose_stamped = pose
-                transformed = do_transform_pose(pose_stamped, transform)
-                transformed_positions.append(transformed)
+                # Create a PointStamped from the pose's position
+                # We only need position for monitoring regions, not orientation
+                point_stamped = PointStamped()
+                point_stamped.header.frame_id = 'world'  # Points start in world frame
+                point_stamped.header.stamp = self.get_clock().now().to_msg()
+                # Copy the position from the pose
+                point_stamped.point.x = pose.position.x
+                point_stamped.point.y = pose.position.y
+                point_stamped.point.z = pose.position.z
+
+                # Transform the point to camera optical frame coordinates
+                transformed_point = do_transform_point(point_stamped, transform)
+                
+                # Create a pose in the camera frame to store the transformed point
+                camera_frame_pose = Pose()
+                camera_frame_pose.position = transformed_point.point
+                # Keep orientation as identity since we only need position for monitoring
+                camera_frame_pose.orientation.w = 1.0
+                
+                transformed_positions.append(camera_frame_pose)
                 
             return transformed_positions
-            
+                
         except Exception as e:
             self.get_logger().error(f'Position transform failed: {str(e)}')
             return None
 
     def project_to_image(self, pose):
-        """Project 3D camera frame coordinates to 2D image coordinates."""
+        """Project 3D camera optical frame coordinates to 2D image coordinates."""
         if self.camera_matrix is None:
             return None
             
-        # Extract 3D point
+        # In the optical frame, Z points forward (into the scene)
+        # X points right in the image, Y points down
         point_3d = np.array([
-            [pose.position.x],
-            [pose.position.y],
-            [pose.position.z]
+            [pose.position.x],  # Right in image
+            [pose.position.y],  # Down in image
+            [pose.position.z]   # Forward from camera
         ])
         
-        # Project to image
+        # Skip if point is behind camera
+        if point_3d[2] <= 0:
+            return None
+        
+        # Project to image using camera intrinsics
         pixel = self.camera_matrix @ point_3d
         pixel = pixel / pixel[2]
         
+        # Convert to integers and return only x,y
         return int(pixel[0]), int(pixel[1])
 
     def get_monitoring_regions(self, positions):
         """Convert 3D positions to 2D pixel regions for monitoring."""
         regions = []
+        half_size = self.monitoring_window_size // 2
+        
         for position in positions:
             pixel_coords = self.project_to_image(position)
             if pixel_coords:
                 x, y = pixel_coords
+                
+                # Create monitoring region centered on projected point
                 region = {
-                    'x': max(0, x - 20),  # 40x40 pixel region centered on point
-                    'y': max(0, y - 20),
-                    'width': 50,
-                    'height': 50
+                    'x': max(0, x - half_size),
+                    'y': max(0, y - half_size),
+                    'width': self.monitoring_window_size,
+                    'height': self.monitoring_window_size
                 }
+                
+                # Adjust region if it would go past image bounds
+                if self.last_color_frame is not None:
+                    height, width = self.last_color_frame.shape[:2]
+                    if region['x'] + region['width'] > width:
+                        region['width'] = width - region['x']
+                    if region['y'] + region['height'] > height:
+                        region['height'] = height - region['y']
+                
                 regions.append(region)
         return regions
 
@@ -249,19 +378,20 @@ class HumanInteraction(Node):
             self.last_depth_frame is not None,
             self.current_block_info is not None,
             self.monitoring_positions is not None,
-            self.block_markers is not None
+            self.block_markers is not None,
+            self.monitoring_regions is not None
         ]
         
         if not all(required_data):
             return
             
         # First region is the original block position
-        original_region = regions[0]
+        original_region = self.monitoring_regions[0]
         
         # Check if block was removed from original position
         if self.detect_region_change(original_region):
             # Check all possible destination positions
-            for i, region in enumerate(regions[1:], 1):
+            for i, region in enumerate(self.monitoring_regions[1:], 1):
                 if self.detect_region_change(region, expect_addition=True):
                     self.get_logger().info(f'Block {self.current_block_index} moved to stack {i-1}')
                     
@@ -272,42 +402,12 @@ class HumanInteraction(Node):
                     
                     # Call the move block service
                     try:
-                        future = self.move_block_client.call_async(move_request)
-                        rclpy.spin_until_future_complete(self, future)
-                        
-                        if future.result() is not None and future.result().success:
-                            self.get_logger().info('Successfully updated block tracking')
-                        else:
-                            self.get_logger().error('Failed to update block tracking')
-                            
+                        self.get_logger().info('Calling move blocks...')
+                        future = self.move_block_client.call_async(move_request)                            
                     except Exception as e:
                         self.get_logger().error(f'Error calling move_block service: {str(e)}')
-                    
-                    # We still update the marker position for visualization
-                    marker_request = UpdateMarkers.Request()
-                    marker_request.input_markers = self.block_markers
-                    marker_request.markers_to_update = [self.current_block_index]
-                    marker_request.update_scale = False
-                    
-                    for marker in marker_request.input_markers.markers:
-                        if marker.id == self.current_block_index:
-                            marker.pose = self.current_block_info.next_positions[i-1]
-                            break
-                    
-                    try:
-                        future = self.update_markers_cli.call_async(marker_request)
-                        rclpy.spin_until_future_complete(self, future)
-                        if future.result() is not None:
-                            self.block_markers = future.result().output_markers
-                            self.get_logger().info('Successfully updated marker position')
-                        else:
-                            self.get_logger().error('Failed to update marker position')
-                    except Exception as e:
-                        self.get_logger().error(f'Error calling update_markers service: {str(e)}')
-                    
-                    # Reset monitoring state
-                    self.monitoring_active = False
-                    self.current_block_index = None
+
+                    self.get_logger().info('Update complete')
                     return
 
     def detect_region_change(self, region, expect_addition=False):
@@ -315,23 +415,48 @@ class HumanInteraction(Node):
         pre_depth = self.get_region_depth(self.pre_interaction_depth, region)
         post_depth = self.get_region_depth(self.last_depth_frame, region)
         
+        # Skip if either depth measurement is invalid
+        if pre_depth == 0.0 or post_depth == 0.0:
+            return False
+        
         # Calculate depth change
         depth_change = post_depth - pre_depth
         
-        # Thresholds for significant change
-        REMOVAL_THRESHOLD = 0.02  # 2cm
-        ADDITION_THRESHOLD = -0.02  # -2cm
+        # Log the depth change for debugging
+        self.get_logger().debug(
+            f'Depth change: {depth_change:.3f}m '
+            f'(pre: {pre_depth:.3f}m, post: {post_depth:.3f}m)'
+        )
         
         if expect_addition:
-            return depth_change < ADDITION_THRESHOLD
-        return depth_change > REMOVAL_THRESHOLD
+            detected = depth_change < -self.depth_change_threshold
+        else:
+            detected = depth_change > self.depth_change_threshold
+            
+        if detected:
+            self.get_logger().info(
+                f'{"Addition" if expect_addition else "Removal"} '
+                f'detected with depth change of {depth_change:.3f}m'
+            )
+            
+        return detected
 
     def get_region_depth(self, depth_image, region):
-        """Calculate median depth in the specified region."""
-        x, y = region['x'], region['y']
-        w, h = region['width'], region['height']
+        """Calculate median depth in the specified region with resolution handling."""
+        # Get the scale factors between color and depth images
+        if self.last_color_frame is not None and depth_image is not None:
+            scale_y = depth_image.shape[0] / self.last_color_frame.shape[0]
+            scale_x = depth_image.shape[1] / self.last_color_frame.shape[1]
+        else:
+            return 0.0
+
+        # Scale the region coordinates to match depth image resolution
+        x = int(region['x'] * scale_x)
+        y = int(region['y'] * scale_y)
+        w = int(region['width'] * scale_x)
+        h = int(region['height'] * scale_y)
         
-        # Ensure coordinates are within image bounds
+        # Ensure coordinates are within depth image bounds
         height, width = depth_image.shape
         x = min(max(x, 0), width - w)
         y = min(max(y, 0), height - h)
@@ -339,8 +464,16 @@ class HumanInteraction(Node):
         # Extract region and calculate median of non-zero depths
         roi = depth_image[y:y+h, x:x+w]
         valid_depths = roi[roi > 0]
-        if len(valid_depths) > 0:
-            return np.median(valid_depths) / 1000.0  # Convert to meters
+        
+        # Calculate ratio of valid depth pixels
+        valid_ratio = len(valid_depths) / (w * h)
+        
+        if len(valid_depths) > 0 and valid_ratio >= self.min_valid_depth_ratio:
+            median_depth = np.median(valid_depths) / 1000.0  # Convert to meters
+            self.get_logger().debug(f'Region depth: {median_depth:.3f}m (valid ratio: {valid_ratio:.2f})')
+            return median_depth
+        
+        self.get_logger().debug(f'Invalid depth region (valid ratio: {valid_ratio:.2f})')
         return 0.0
 
     def localize_camera_callback(self, request, response):

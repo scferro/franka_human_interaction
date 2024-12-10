@@ -114,6 +114,12 @@ def generate_launch_description():
         description='Length of gesture sequences'
     )
 
+    norm_values_path_arg = DeclareLaunchArgument(
+        'norm_values_path',
+        default_value=os.path.join(default_logs_dir, 'norm_values.csv'),
+        description='Path to save normalization values'
+    )
+
     # Static transforms 
     world_to_panda = Node(
         package='tf2_ros',
@@ -169,6 +175,7 @@ def generate_launch_description():
             # Directories
             'save_directory': LaunchConfiguration('save_directory'),
             'log_directory': LaunchConfiguration('log_directory'),
+            'norm_values_path': LaunchConfiguration('norm_values_path'),
             
             # Network configuration
             'buffer_size': LaunchConfiguration('buffer_size'),
@@ -227,6 +234,7 @@ def generate_launch_description():
         save_directory_arg,
         log_directory_arg,
         training_images_arg,
+        norm_values_path_arg,
         
         # Data saving arguments
         save_training_data_arg,

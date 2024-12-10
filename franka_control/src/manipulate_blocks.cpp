@@ -129,8 +129,8 @@ public:
     block_markers = visualization_msgs::msg::MarkerArray();
 
     // Initialize pile positions for 4 categories
-    pile_0_start.position.x = scan_position_x - 0.15;
-    pile_0_start.position.y = -0.3;
+    pile_0_start.position.x = scan_position_x - 0.2;
+    pile_0_start.position.y = -0.4;
     pile_0_start.position.z = 0.0;
     pile_0_start.orientation.x = 1.0;
     pile_0_start.orientation.y = 0.0;
@@ -138,13 +138,14 @@ public:
     pile_0_start.orientation.w = 0.0;
 
     pile_1_start = pile_0_start;
-    pile_1_start.position.y = 0.3;
+    pile_1_start.position.y = 0.4;
 
     pile_2_start = pile_0_start;
-    pile_2_start.position.x = scan_position_x + 0.15;
+    pile_2_start.position.x = scan_position_x + 0.2;
+    pile_2_start.position.y = -0.35;
 
     pile_3_start = pile_2_start;
-    pile_3_start.position.y = 0.4;
+    pile_3_start.position.y = 0.35;
 
     human_sort_input = -1;
   }
@@ -271,7 +272,7 @@ private:
       overhead_scan_pose.header.frame_id = "world";
       overhead_scan_pose.pose.position.x = scan_position_x;
       overhead_scan_pose.pose.position.y = 0.0;
-      overhead_scan_pose.pose.position.z = 0.3;
+      overhead_scan_pose.pose.position.z = 0.25;
       overhead_scan_pose.pose.orientation.x = 1.0;
       overhead_scan_pose.pose.orientation.y = 0.0;
       overhead_scan_pose.pose.orientation.z = 0.0;
@@ -305,7 +306,7 @@ private:
       };
 
       int count = 0;
-      while ((!scan_overhead_cli->wait_for_service(1s)) && (count < 5)) {
+      while ((!scan_overhead_cli->wait_for_service(1s)) && (count < 10)) {
           RCLCPP_INFO(this->get_logger(), "Waiting for scan_overhead service");
           count++;
       }
@@ -400,6 +401,7 @@ void update_piles_callback(
     const std::shared_ptr<franka_hri_interfaces::srv::MoveBlock::Request> request,
     std::shared_ptr<franka_hri_interfaces::srv::MoveBlock::Response> response)
 {
+    RCLCPP_INFO(this->get_logger(), "Updating piles");
     // Find which pile currently contains the block
     std::vector<std::vector<int>*> piles = {&pile_0_index, &pile_1_index, &pile_2_index, &pile_3_index};
     std::vector<geometry_msgs::msg::Pose*> pile_starts = {&pile_0_start, &pile_1_start, &pile_2_start, &pile_3_start};
@@ -449,12 +451,62 @@ void update_piles_callback(
         target_pile_start->position.x += -0.15;  // Move pile start back for new stack
     }
 
+    // Calculate the new position for the block
+    geometry_msgs::msg::Pose new_pose = *target_pile_start;
+    if (!target_pile->empty()) {
+        // Get the top block's position and add height
+        auto top_block = block_markers.markers[target_pile->back()];
+        auto new_block = block_markers.markers[request->block_index];
+        new_pose.position.z = top_block.pose.position.z + (top_block.scale.z / 2) + (new_block.scale.z / 2);
+    }
+
+    // Update the marker's position
+    auto marker = block_markers.markers[request->block_index];
+    marker.pose = new_pose;
+    
+    // Prepare the update markers request
+    auto update_request = std::make_shared<franka_hri_interfaces::srv::UpdateMarkers::Request>();
+    marker.action = 0;  // Update action
+    update_request->input_markers.markers.push_back(marker);
+    std::vector<int> update = {request->block_index};
+    update_request->markers_to_update = update;
+
+    // Create promise/future pair for marker update
+    auto response_received = std::make_shared<std::promise<franka_hri_interfaces::srv::UpdateMarkers::Response::SharedPtr>>();
+    auto future_result = response_received->get_future();
+
+    // Callback for marker update
+    auto callback = [this, response_received](
+        rclcpp::Client<franka_hri_interfaces::srv::UpdateMarkers>::SharedFuture future) {
+        try {
+            auto result = future.get();
+            this->block_markers = result->output_markers;
+            response_received->set_value(result);
+            RCLCPP_INFO(this->get_logger(), "Marker update complete");
+        } catch (const std::exception& e) {
+            RCLCPP_ERROR(this->get_logger(), "Error in update callback: %s", e.what());
+        }
+    };
+
+    // Send marker update request
+    int count = 0;
+    while ((!update_markers_cli->wait_for_service(1s)) && (count < 5)) {
+        RCLCPP_INFO(this->get_logger(), "Waiting for update_markers service");
+        count++;
+    }
+    update_markers_cli->async_send_request(update_request, callback);
+
+    // Wait for marker update to complete
+    if (future_result.wait_for(std::chrono::seconds(5)) == std::future_status::timeout) {
+        RCLCPP_ERROR(this->get_logger(), "Failed to update markers - timeout");
+        response->success = false;
+        return;
+    }
+
     // Add block to new pile's tracking
     target_pile->push_back(request->block_index);
 
-    // Recreate collision objects for both piles with updated positions
-    // This ensures the planning scene stays accurate
-    
+    // Recreate collision objects for both piles
     // Recreate source pile collision objects if it's not empty
     if (source_pile && !source_pile->empty()) {
         for (int id : *source_pile) {
@@ -476,9 +528,6 @@ void update_piles_callback(
                            block_markers.markers[id].scale, 
                            block_id);
     }
-
-    // Publish updated block placement information
-    publish_placement_info(request->block_index, request->new_category);
     
     response->success = true;
 }
@@ -541,7 +590,7 @@ void publish_placement_info(int last_block_index, int last_placed_category) {
         } else if (!pile_index->empty()) {
             // Calculate height based on current top block
             auto last_block = block_markers.markers[pile_index->back()];
-            next_pose.position.z = last_block.pose.position.z + (last_block.scale.z / 2);
+            next_pose.position.z = last_block.pose.position.z + (last_block.scale.z / 2) + 0.02; // Add a fixed offset bc lazy
         }
         
         msg.next_positions[cat] = next_pose;
@@ -1015,7 +1064,7 @@ geometry_msgs::msg::PoseStamped get_pile_pose(int category) {
    request->update_scale = update_scale;
 
    int count = 0;
-   while ((!scan_overhead_cli->wait_for_service(1s)) && (count < 5)) {
+   while ((!scan_overhead_cli->wait_for_service(1s)) && (count < 10)) {
      RCLCPP_INFO(this->get_logger(), "Waiting for scan_overhead service");
      count++;
    }

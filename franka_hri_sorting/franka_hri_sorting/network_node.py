@@ -1,6 +1,6 @@
 import rclpy
 from rclpy.node import Node
-from std_srvs.srv import Empty
+from std_srvs.srv import Trigger
 from franka_hri_interfaces.srv import SortNet, GestNet, SaveModel, CorrectionService
 from sensor_msgs.msg import Image 
 from std_msgs.msg import Float32MultiArray
@@ -268,9 +268,15 @@ class DataSaver:
             writer = csv.writer(f)
             writer.writerow(image_headers)
 
-    def save_image_data(self, image_tensor: torch.Tensor, label: int, 
-                   confidence: float = None):
-        """Save image data as PNG file."""
+    def save_image_data(self, image_tensor: torch.Tensor, label: int, confidence: float = None):
+        """
+        Save image data as PNG file with proper tensor to image conversion.
+        
+        Args:
+            image_tensor: Input tensor in format [batch_size, channels, height, width]
+            label: Classification label for the image
+            confidence: Confidence score for the prediction (optional)
+        """
         if not self.enabled:
             return
             
@@ -280,7 +286,6 @@ class DataSaver:
             image_name = f"image_{timestamp}.png"
             image_path = self.image_dir / image_name
             
-            # Convert tensor to image format
             # First denormalize the tensor - reverse the normalization done in preprocessing
             denorm = transforms.Normalize(
                 mean=[-0.485/0.229, -0.456/0.224, -0.406/0.225],
@@ -290,10 +295,24 @@ class DataSaver:
             
             # Convert to PIL Image and save as PNG
             image = transforms.ToPILImage()(denormalized)
-            image.save(image_path)
+            image.save(str(image_path))  # Convert Path to string for compatibility
+            
+            # Log metadata to CSV
+            with open(self.image_file, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    timestamp,
+                    label,
+                    confidence if confidence is not None else '',
+                    image_name
+                ])
+                
+            self.get_logger().debug(
+                f"Saved image {image_name} with label {label}"
+            )
                 
         except Exception as e:
-            print(f"Error saving image data: {e}")
+            self.get_logger().error(f"Error saving image data: {e}")
     
     def save_gesture_data(self, sequence: list, label: int, confidence: float = None, 
                          gesture_type: str = 'binary'):
@@ -360,6 +379,7 @@ class NetworkNode(Node):
         self.declare_parameter('log_directory', '/home/user/network_logs')
         self.declare_parameter('save_training_data', True)
         self.declare_parameter('training_data_dir', '/home/user/training_data')
+        self.declare_parameter('norm_values_path', '/home/user/network_logs/norm_values.csv')
         
         self.buffer_size = self.get_parameter('buffer_size').value
         self.buffer_size_gest = self.get_parameter('buffer_size_gest').value
@@ -371,6 +391,7 @@ class NetworkNode(Node):
         self.log_dir = self.get_parameter('log_directory').value
         save_training = self.get_parameter('save_training_data').value
         training_data_dir = self.get_parameter('training_data_dir').value
+        self.norm_values_path = self.get_parameter('norm_values_path').value
         
         self.logger = NetworkLogger(self.log_dir)
         self.data_saver = DataSaver(training_data_dir, save_training)
@@ -416,6 +437,8 @@ class NetworkNode(Node):
         self.mod48_buffer = None
         self.combined_sequence = []
         self.last_inference_sequence = []
+        self.norm_values = np.ones(4)
+        self._load_norm_values()
 
     def _init_correction_state(self):
         """Initialize state tracking for corrections."""
@@ -446,6 +469,7 @@ class NetworkNode(Node):
         self.create_service(CorrectionService, 'correct_sorting', self.correct_sorting_callback)
         self.create_service(CorrectionService, 'correct_gesture', self.correct_gesture_callback)
         self.create_service(CorrectionService, 'correct_complex_gesture', self.correct_complex_gesture_callback)
+        self.norm_trigger = self.create_service( Trigger, 'collect_norm_values', self.handle_norm_trigger)
 
     def _init_subscribers(self):
         """Initialize all ROS subscribers."""
@@ -461,6 +485,46 @@ class NetworkNode(Node):
             self.mod51_callback,
             10
         )
+
+    def _load_norm_values(self):
+        """Load normalization values from CSV."""
+        try:
+            if os.path.exists(self.norm_values_path):
+                self.norm_values = np.loadtxt(self.norm_values_path)
+                self.get_logger().info(f"Loaded normalization values: {self.norm_values}")
+        except Exception as e:
+            self.get_logger().error(f"Error loading normalization values: {e}")
+
+    def _save_norm_values(self):
+        """Save normalization values to CSV."""
+        try:
+            os.makedirs(os.path.dirname(self.norm_values_path), exist_ok=True)
+            np.savetxt(self.norm_values_path, self.norm_values)
+            self.get_logger().info(f"Saved normalization values: {self.norm_values}")
+        except Exception as e:
+            self.get_logger().error(f"Error saving normalization values: {e}")
+
+    def handle_norm_trigger(self, request, response):
+        """Process current sequence to extract norm values."""
+        try:
+            if not self.combined_sequence:
+                response.success = False 
+                response.message = "No sequence data available"
+                return response
+                
+            sequence_array = np.array(self.combined_sequence)
+            # Get absolute maximum values for each column
+            self.norm_values = np.abs(sequence_array).max(axis=0)
+            self._save_norm_values()
+            
+            response.success = True
+            response.message = f"Updated normalization values: {self.norm_values}"
+            return response
+            
+        except Exception as e:
+            response.success = False
+            response.message = f"Error: {str(e)}"
+            return response
 
     def _cache_training_state(self, network_type: str, input_data: any, label: int):
         """Cache network and buffer state before training."""
@@ -657,16 +721,18 @@ class NetworkNode(Node):
             response.confidence = 0.0
             response.prediction_id = ""
             return response
-
+        
     def train_sorting_callback(self, request, response):
-        """Handle training requests for the complex sorting network."""
         try:
-            # Convert image and cache state
+            # Convert ROS Image to CV2 image
             cv_image = self.bridge.imgmsg_to_cv2(request.image, desired_encoding='rgb8')
             image_tensor = self._preprocess_image(cv_image)
+
+            # Cache current state 
+            self._cache_training_state('sorting', image_tensor, request.label)
             
-            # Cache current state
-            self._cache_training_state('sorting', request.image, request.label)
+            # Get the stored prediction info for saving
+            last_sample = self.last_training_samples['sorting']
 
             # Add to appropriate class buffer
             class_idx = int(request.label)
@@ -675,47 +741,23 @@ class NetworkNode(Node):
             else:
                 raise ValueError(f"Invalid class index: {class_idx}")
 
-            # Log buffer sizes
-            buffer_sizes = [len(buffer) for buffer in self.sorting_class_buffers]
-            self.get_logger().info(f"Current sorting buffer sizes: {buffer_sizes}")
-            
-            # Get balanced training data
-            images, labels = self._balance_multi_class_data(self.sorting_class_buffers)
+            # Save the training data before network training
+            self.data_saver.save_image_data(
+                image_tensor,
+                request.label,
+                last_sample.confidence if last_sample else None
+            )
 
-            # Get the stored prediction from the last training sample
-            last_sample = self.last_training_samples['sorting']
-            
-            # Train if we have images
+            # Get balanced training data and train
+            images, labels = self._balance_multi_class_data(self.sorting_class_buffers)
             if images:
-                # Save training data using provided confidence
-                self.data_saver.save_image_data(
-                    image_tensor, 
-                    request.label,
-                    last_sample.confidence
-                )
-                
-                # Train network
                 self.sorting_net.train_network(images, labels)
-                
-                self.logger.log_prediction_and_feedback(
-                    'complex_sorting',
-                    last_sample.prediction, 
-                    last_sample.confidence,
-                    request.label
-                )
-                
-                self.get_logger().info(
-                    f"Trained sorting network on {len(images)} images"
-                )
-            
-            # Generate prediction ID for response
-            prediction_id = f"train_sort_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{random.randint(1000, 9999)}"
-            
+                    
             response.prediction = 0.0
             response.confidence = request.confidence
-            response.prediction_id = prediction_id
+            response.prediction_id = f"train_sort_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{random.randint(1000, 9999)}"
             return response
-            
+
         except Exception as e:
             self.get_logger().error(f"Error training sorting network: {str(e)}")
             response.prediction = -1.0
@@ -1116,14 +1158,18 @@ class NetworkNode(Node):
             return None
 
     def normalize_sequence(self, tensor_data):
-        """Normalize the full sequence."""
+        """Normalize sequence using saved normalization values."""
         try:
-            mean = tensor_data.mean()
-            std = tensor_data.std() + 1e-8
-            normalized = (tensor_data - mean) / std
+            # Convert norm values to tensor and match device/dtype
+            norm_tensor = torch.from_numpy(self.norm_values).to(
+                device=tensor_data.device,
+                dtype=tensor_data.dtype
+            )
+            # Normalize using maximum values
+            normalized = tensor_data / norm_tensor.unsqueeze(0).unsqueeze(0)
             return normalized
         except Exception as e:
-            self.get_logger().error(f'Error normalizing sequence: {str(e)}')
+            self.get_logger().error(f"Error normalizing sequence: {e}")
             return tensor_data
 
     def _balance_data(self, buffer_0, buffer_1):
