@@ -1,8 +1,0 @@
-# Request
-string text_command
-sensor_msgs/Image[] observations_main
-sensor_msgs/Image[] observations_wrist
-sensor_msgs/Image[] goal_images
----
-# Response
-franka_hri_interfaces/EECommand[] actions
