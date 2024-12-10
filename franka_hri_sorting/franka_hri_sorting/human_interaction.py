@@ -11,6 +11,7 @@ from visualization_msgs.msg import MarkerArray
 from franka_hri_interfaces.msg import BlockPlacementInfo
 from franka_hri_interfaces.srv import UpdateMarkers
 from franka_hri_interfaces.srv import MoveBlock
+from franka_hri_interfaces.srv import CorrectionService
 import mediapipe as mp
 import numpy as np
 import cv2
@@ -119,6 +120,25 @@ class HumanInteraction(Node):
             'update_piles',
             callback_group=self.blocks_callback_group,
             )
+        
+        # Create a reentrant callback group for service clients
+        self.corrections_group = rclpy.callback_groups.ReentrantCallbackGroup()
+        # Add correction service clients
+        self.sort_correction_client = self.create_client(
+            CorrectionService, 
+            'correct_sorting',
+            callback_group=self.corrections_group
+        )
+        self.gesture_correction_client = self.create_client(
+            CorrectionService, 
+            'correct_gesture',
+            callback_group=self.corrections_group
+        )
+        self.complex_gesture_correction_client = self.create_client(
+            CorrectionService, 
+            'correct_complex_gesture',
+            callback_group=self.corrections_group
+        )
         
         # Load calibration if exists
         calibration_file = self.get_parameter('calibration_file').value
@@ -368,7 +388,7 @@ class HumanInteraction(Node):
                 regions.append(region)
         return regions
 
-    def detect_block_movement(self):
+    async def detect_block_movement(self):
         """Compare pre and post interaction frames to detect block movement and update tracking."""
         # Check if all required data is available
         required_data = [
@@ -393,53 +413,57 @@ class HumanInteraction(Node):
             # Check all possible destination positions
             for i, region in enumerate(self.monitoring_regions[1:], 1):
                 if self.detect_region_change(region, expect_addition=True):
-                    self.get_logger().info(f'Block {self.current_block_index} moved to stack {i-1}')
+                    old_category = self.current_block_info.last_block_category
+                    new_category = i-1  # Categories are 0-based
+                    self.get_logger().info(f'Block {self.current_block_index} moved from category {old_category} to {new_category}')
                     
-                    # Create MoveBlock request to update pile tracking
-                    move_request = MoveBlock.Request()
-                    move_request.block_index = self.current_block_index
-                    move_request.new_category = i-1  # Categories are 0-based
-                    
-                    # Call the move block service
                     try:
-                        self.get_logger().info('Calling move blocks...')
-                        future = self.move_block_client.call_async(move_request)                            
+                        # Call move block service first
+                        move_request = MoveBlock.Request()
+                        move_request.block_index = self.current_block_index
+                        move_request.new_category = new_category
+                        
+                        move_future = self.move_block_client.call_async(move_request)
+                        
+                        # Create correction requests
+                        sort_correction = CorrectionService.Request()
+                        sort_correction.old_label = old_category
+                        sort_correction.new_label = new_category
+                        
+                        complex_gesture_correction = CorrectionService.Request()
+                        complex_gesture_correction.old_label = old_category
+                        complex_gesture_correction.new_label = new_category
+                        
+                        gesture_correction = CorrectionService.Request()
+                        gesture_correction.old_label = 0  # For binary gesture, old label doesn't matter
+                        gesture_correction.new_label = 0  # Always mark as incorrect classification
+                        
+                        # Call all correction services asynchronously
+                        sort_future = self.sort_correction_client.call_async(sort_correction)
+                        gesture_future = self.gesture_correction_client.call_async(gesture_correction)
+                        complex_future = self.complex_gesture_correction_client.call_async(complex_gesture_correction)
+                        
+                        # Wait for all services to complete
+                        try:
+                            await move_future
+                            sort_result = await sort_future
+                            gesture_result = await gesture_future
+                            complex_result = await complex_future
+                            
+                            # Log results
+                            self.get_logger().info(
+                                f"Correction results - Sorting: {sort_result.success}, "
+                                f"Gesture: {gesture_result.success}, "
+                                f"Complex Gesture: {complex_result.success}"
+                            )
+                        except Exception as e:
+                            self.get_logger().error(f"Error waiting for correction services: {str(e)}")
+                            
                     except Exception as e:
-                        self.get_logger().error(f'Error calling move_block service: {str(e)}')
+                        self.get_logger().error(f'Error calling correction services: {str(e)}')
 
                     self.get_logger().info('Update complete')
                     return
-
-    def detect_region_change(self, region, expect_addition=False):
-        """Detect significant depth changes in the specified region."""
-        pre_depth = self.get_region_depth(self.pre_interaction_depth, region)
-        post_depth = self.get_region_depth(self.last_depth_frame, region)
-        
-        # Skip if either depth measurement is invalid
-        if pre_depth == 0.0 or post_depth == 0.0:
-            return False
-        
-        # Calculate depth change
-        depth_change = post_depth - pre_depth
-        
-        # Log the depth change for debugging
-        self.get_logger().debug(
-            f'Depth change: {depth_change:.3f}m '
-            f'(pre: {pre_depth:.3f}m, post: {post_depth:.3f}m)'
-        )
-        
-        if expect_addition:
-            detected = depth_change < -self.depth_change_threshold
-        else:
-            detected = depth_change > self.depth_change_threshold
-            
-        if detected:
-            self.get_logger().info(
-                f'{"Addition" if expect_addition else "Removal"} '
-                f'detected with depth change of {depth_change:.3f}m'
-            )
-            
-        return detected
 
     def get_region_depth(self, depth_image, region):
         """Calculate median depth in the specified region with resolution handling."""

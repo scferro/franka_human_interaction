@@ -47,7 +47,8 @@ class NetworkState:
 class TrainingSample:
     """Stores information about a training sample."""
     input_data: any  # Image or sequence
-    label: int
+    label: int  # The true/corrected label
+    original_label: int  # The original predicted label
     network_state: NetworkState
     buffer_state: any  
     prediction: float
@@ -132,22 +133,66 @@ class NetworkLogger:
             writer.writerow(correction_headers)
 
     def log_correction(self, network_type: str, old_label: int, new_label: int, success: bool):
-        """Log a correction attempt."""
+        """Update existing log entry with correction information."""
         with self.lock:
             timestamp = datetime.now().timestamp()
             
-            with open(self.correction_log, 'a', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    datetime.fromtimestamp(timestamp).isoformat(),
-                    network_type,
-                    old_label,
-                    new_label,
-                    success
-                ])
+            # Get the appropriate log file
+            log_file = self._get_log_file(network_type)
             
+            # Read all lines from the log file
+            lines = []
+            with open(log_file, 'r', newline='') as f:
+                reader = csv.reader(f)
+                lines = list(reader)
+                
+            if len(lines) < 2:  # Just header or empty file
+                self.get_logger().warn(f"No entries to update in {log_file}")
+                return
+                
+            # Update the last entry with the new label and recalculate correctness
+            last_entry = lines[-1]
+            
+            # Parse prediction based on network type
+            if network_type in ['complex_sorting', 'complex_gesture']:
+                # Convert string representation of array back to numpy array
+                prediction_str = last_entry[1].strip('[]').split()
+                prediction = np.array([float(x) for x in prediction_str])
+            else:
+                prediction = float(last_entry[1])
+                
+            confidence = float(last_entry[2])
+            
+            # Update true label with the new label
+            last_entry[3] = str(new_label)
+            
+            # Recalculate was_correct based on network type
+            if network_type in ['complex_sorting', 'complex_gesture']:
+                was_correct = (np.argmax(prediction) == new_label)
+            else:
+                was_correct = (prediction >= 0.5) == (new_label >= 0.5)
+            last_entry[4] = str(was_correct)
+            
+            # Write back all lines including the updated one
+            with open(log_file, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerows(lines)
+            
+            # Update statistics
             if success:
                 self.stats[network_type]['corrections'] += 1
+                # Update confusion matrix - subtract old prediction and add new one
+                if network_type in ['complex_sorting', 'complex_gesture']:
+                    pred_class = np.argmax(prediction)
+                    self.stats[network_type]['confusion_matrix'][old_label][pred_class] -= 1
+                    self.stats[network_type]['confusion_matrix'][new_label][pred_class] += 1
+                else:
+                    pred_class = 1 if prediction >= 0.5 else 0
+                    old_class = 1 if old_label >= 0.5 else 0
+                    new_class = 1 if new_label >= 0.5 else 0
+                    self.stats[network_type]['confusion_matrix'][old_class][pred_class] -= 1
+                    self.stats[network_type]['confusion_matrix'][new_class][pred_class] += 1
+                
                 self._save_stats()
 
     def log_prediction_and_feedback(self, network_type: str, prediction: float, 
@@ -231,9 +276,9 @@ class NetworkLogger:
         
 class DataSaver:
     """Data saver that stores each gesture as an individual file."""
-    
     def __init__(self, base_dir: str, enabled: bool = True):
         self.enabled = enabled
+        
         if not enabled:
             return
             
@@ -269,14 +314,7 @@ class DataSaver:
             writer.writerow(image_headers)
 
     def save_image_data(self, image_tensor: torch.Tensor, label: int, confidence: float = None):
-        """
-        Save image data as PNG file with proper tensor to image conversion.
-        
-        Args:
-            image_tensor: Input tensor in format [batch_size, channels, height, width]
-            label: Classification label for the image
-            confidence: Confidence score for the prediction (optional)
-        """
+        """Save image data as PNG file with proper tensor to image conversion."""
         if not self.enabled:
             return
             
@@ -286,16 +324,16 @@ class DataSaver:
             image_name = f"image_{timestamp}.png"
             image_path = self.image_dir / image_name
             
-            # First denormalize the tensor - reverse the normalization done in preprocessing
+            # First denormalize the tensor
             denorm = transforms.Normalize(
                 mean=[-0.485/0.229, -0.456/0.224, -0.406/0.225],
                 std=[1/0.229, 1/0.224, 1/0.225]
             )
-            denormalized = denorm(image_tensor[0])  # Remove batch dimension
+            denormalized = denorm(image_tensor[0])
             
-            # Convert to PIL Image and save as PNG
+            # Convert to PIL Image and save
             image = transforms.ToPILImage()(denormalized)
-            image.save(str(image_path))  # Convert Path to string for compatibility
+            image.save(str(image_path))
             
             # Log metadata to CSV
             with open(self.image_file, 'a', newline='') as f:
@@ -306,13 +344,8 @@ class DataSaver:
                     confidence if confidence is not None else '',
                     image_name
                 ])
-                
-            self.get_logger().debug(
-                f"Saved image {image_name} with label {label}"
-            )
-                
         except Exception as e:
-            self.get_logger().error(f"Error saving image data: {e}")
+            print(f"Error saving image data: {e}")
     
     def save_gesture_data(self, sequence: list, label: int, confidence: float = None, 
                          gesture_type: str = 'binary'):
@@ -526,14 +559,43 @@ class NetworkNode(Node):
             response.message = f"Error: {str(e)}"
             return response
 
-    def _cache_training_state(self, network_type: str, input_data: any, label: int):
+    def _cache_training_state(self, network_type: str, input_data: any, label: int, original_label: int = None):
         """Cache network and buffer state before training."""
         if network_type == 'sorting':
             network = self.sorting_net
             buffer_state = [list(buffer) for buffer in self.sorting_class_buffers]
-            # For sorting network, prediction is a list of class probabilities
+            
+            # Convert tensor to ROS Image message if it isn't already
+            if isinstance(input_data, torch.Tensor):
+                try:
+                    # Denormalize the image tensor
+                    denorm = transforms.Normalize(
+                        mean=[-0.485/0.229, -0.456/0.224, -0.406/0.225],
+                        std=[1/0.229, 1/0.224, 1/0.225]
+                    )
+                    denormalized = denorm(input_data[0])
+                    
+                    # Convert to numpy array and then to CV2 image
+                    np_image = denormalized.permute(1, 2, 0).numpy()
+                    np_image = (np_image * 255).astype(np.uint8)
+                    
+                    # Convert BGR to RGB
+                    rgb_image = cv2.cvtColor(np_image, cv2.COLOR_BGR2RGB)
+                    
+                    # Convert to ROS message
+                    input_data = self.bridge.cv2_to_imgmsg(rgb_image, encoding='rgb8')
+                except Exception as e:
+                    self.get_logger().error(f"Error converting tensor to ROS message: {e}")
+                    return
+
             with torch.no_grad():
-                output = network(input_data)
+                if isinstance(input_data, torch.Tensor):
+                    output = network(input_data)
+                else:
+                    # Convert ROS Image to tensor for prediction
+                    cv_image = self.bridge.imgmsg_to_cv2(input_data, desired_encoding='rgb8')
+                    image_tensor = self._preprocess_image(cv_image)
+                    output = network(image_tensor)
                 prediction = output.numpy()[0]
                 confidence = float(torch.max(output).item())
 
@@ -549,7 +611,6 @@ class NetworkNode(Node):
         else:  # complex_gesture
             network = self.complex_gesture_net
             buffer_state = [list(buffer) for buffer in self.complex_gesture_buffers]
-            # For complex gesture network, prediction is a list of class probabilities
             with torch.no_grad():
                 output = network(self.normalize_sequence(self.process_sensor_data(input_data)))
                 prediction = output.numpy()[0]
@@ -558,12 +619,13 @@ class NetworkNode(Node):
         network_state = NetworkState.from_network(network)
         
         self.last_training_samples[network_type] = TrainingSample(
-            input_data=copy.deepcopy(input_data),
+            input_data=input_data,
             label=label,
+            original_label=original_label if original_label is not None else label,
             network_state=network_state,
             buffer_state=buffer_state,
-            prediction=prediction,  
-            confidence=confidence 
+            prediction=prediction,
+            confidence=confidence
         )
 
     def _restore_training_state(self, network_type: str) -> Optional[TrainingSample]:
@@ -583,7 +645,7 @@ class NetworkNode(Node):
         else:  # complex_gesture
             network = self.complex_gesture_net
             self.complex_gesture_buffers = [deque(buffer, maxlen=self.buffer_size_gest) 
-                                          for buffer in sample.buffer_state]
+                                        for buffer in sample.buffer_state]
             
         sample.network_state.apply_to_network(network)
         return sample
@@ -597,14 +659,10 @@ class NetworkNode(Node):
             )
         except Exception as e:
             self.get_logger().error(f"Error logging periodic stats: {str(e)}")
-
+                
     def get_sorting_prediction_callback(self, request, response):
-        """Handle prediction requests for the sorting network."""
         try:
-            cv_image = self.bridge.imgmsg_to_cv2(
-                request.image, 
-                desired_encoding='rgb8'
-            )
+            cv_image = self.bridge.imgmsg_to_cv2(request.image, desired_encoding='rgb8')
             image_tensor = self._preprocess_image(cv_image)
             
             with torch.no_grad():
@@ -612,19 +670,20 @@ class NetworkNode(Node):
                 prediction = output.numpy()[0]
                 confidence = float(torch.max(output).item())
             
-            # Generate unique prediction ID using timestamp and random suffix
+            # Get the predicted class
+            predicted_label = int(np.argmax(prediction))
+            
+            # Cache with both the predicted label and itself as original
+            self._cache_training_state('sorting', request.image, predicted_label, predicted_label)
+            
             prediction_id = f"sort_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{random.randint(1000, 9999)}"
             
-            response.prediction = float(np.argmax(prediction))
+            response.prediction = float(predicted_label)
             response.confidence = confidence
             response.prediction_id = prediction_id
             
-            self.get_logger().info(
-                f'Sorting prediction: {response.prediction} '
-                f'(confidence: {confidence:.3f}, ID: {prediction_id})'
-            )
             return response
-            
+        
         except Exception as e:
             self.get_logger().error(f'Error in sorting prediction: {str(e)}')
             response.prediction = -1.0
@@ -661,11 +720,6 @@ class NetworkNode(Node):
             response.prediction = prediction
             response.confidence = confidence
             response.prediction_id = prediction_id
-            
-            self.get_logger().info(
-                f'Binary gesture prediction: {prediction:.3f} '
-                f'(confidence: {confidence:.3f}, ID: {prediction_id})'
-            )
             
             self.last_inference_sequence = self.combined_sequence.copy()
             return response
@@ -707,11 +761,6 @@ class NetworkNode(Node):
             response.confidence = confidence
             response.prediction_id = prediction_id
             
-            self.get_logger().info(
-                f'Complex gesture prediction: {response.prediction} '
-                f'(confidence: {confidence:.3f}, ID: {prediction_id})'
-            )
-            
             self.last_inference_sequence = self.combined_sequence.copy()
             return response
             
@@ -724,15 +773,22 @@ class NetworkNode(Node):
         
     def train_sorting_callback(self, request, response):
         try:
-            # Convert ROS Image to CV2 image
             cv_image = self.bridge.imgmsg_to_cv2(request.image, desired_encoding='rgb8')
             image_tensor = self._preprocess_image(cv_image)
 
-            # Cache current state 
-            self._cache_training_state('sorting', image_tensor, request.label)
+            # Update the cached state with the correct label
+            self._cache_training_state('sorting', request.image, request.label)
             
             # Get the stored prediction info for saving
             last_sample = self.last_training_samples['sorting']
+            if last_sample:
+                # Log the prediction and feedback
+                self.logger.log_prediction_and_feedback(
+                    'complex_sorting',
+                    last_sample.prediction,  # Use stored prediction array
+                    last_sample.confidence,  # Use stored confidence
+                    request.label  # True label from request
+                )
 
             # Add to appropriate class buffer
             class_idx = int(request.label)
@@ -752,6 +808,9 @@ class NetworkNode(Node):
             images, labels = self._balance_multi_class_data(self.sorting_class_buffers)
             if images:
                 self.sorting_net.train_network(images, labels)
+                self.get_logger().info(
+                    f'Trained sorting network with {len(images)} images'
+                )
                     
             response.prediction = 0.0
             response.confidence = request.confidence
@@ -930,38 +989,54 @@ class NetworkNode(Node):
     def correct_sorting_callback(self, request, response):
         """Handle correction requests for sorting network."""
         try:
-            # Restore previous state
-            sample = self._restore_training_state('sorting')
+            # Get previous state (but don't restore it)
+            sample = self.last_training_samples['sorting']
             if sample is None:
                 response.success = False
                 response.message = "No previous training sample found"
                 return response
 
-            if request.old_label != sample.label:
-                response.success = False
-                response.message = "Old label doesn't match last training"
-                return response
+            # Convert ROS Image to tensor for buffer storage
+            cv_image = self.bridge.imgmsg_to_cv2(sample.input_data, desired_encoding='rgb8')
+            image_tensor = self._preprocess_image(cv_image)
+
+            # Use the original predicted label for removal
+            old_class_idx = request.old_label
+            new_class_idx = request.new_label
+
+            # Log buffer states before correction
+            self.get_logger().info(f"Before correction - Buffer sizes: {[len(buf) for buf in self.sorting_class_buffers]}")
+            self.get_logger().info(f"Removing from original class {old_class_idx}, adding to new class {new_class_idx}")
+
+            # Remove from old buffer
+            old_buffer = self.sorting_class_buffers[old_class_idx]
+            if old_buffer:
+                old_buffer.pop()  # Remove the last tensor in the buffer
+                self.get_logger().info(f"Removed tensor from class {old_class_idx}")
+
+            # Log buffer states after correction
+            self.get_logger().info(f"After correction - Buffer sizes: {[len(buf) for buf in self.sorting_class_buffers]}")
 
             # Create new training request with corrected label
             new_request = SortNet.Request()
             new_request.image = sample.input_data
             new_request.label = request.new_label
 
-            # Retrain with corrected label
+            # Train with corrected label
             train_response = self.train_sorting_callback(new_request, SortNet.Response())
-            success = train_response.prediction >= 0
 
             # Log correction
             self.logger.log_correction('complex_sorting', 
-                                     request.old_label,
-                                     request.new_label, 
-                                     success)
+                                    old_class_idx,
+                                    request.new_label, 
+                                    False)
 
-            response.success = success
+            response.success = True
             response.message = "Correction applied successfully"
             return response
 
         except Exception as e:
+            self.get_logger().error(f"Error in correct_sorting_callback: {str(e)}")
             response.success = False
             response.message = f"Error applying correction: {str(e)}"
             return response
@@ -969,34 +1044,51 @@ class NetworkNode(Node):
     def correct_gesture_callback(self, request, response):
         """Handle correction requests for gesture network."""
         try:
-            # Restore previous state
-            sample = self._restore_training_state('gesture')
+            # Get previous state (but don't restore it)
+            sample = self.last_training_samples['gesture']
             if sample is None:
                 response.success = False
                 response.message = "No previous training sample found"
                 return response
 
-            if request.old_label != sample.label:
-                response.success = False
-                response.message = "Old label doesn't match last training"
-                return response
+            # Process sequence for buffer storage
+            sequence_tensor = self.process_sensor_data(sample.input_data)
+            normalized_sequence = self.normalize_sequence(sequence_tensor)
 
-            # Recreate last sequence
+            # Remove from old buffer
+            if sample.label == 0:
+                for seq in self.gesture_class_0:
+                    if torch.equal(seq, normalized_sequence):
+                        self.gesture_class_0.remove(seq)
+                        break
+            else:
+                for seq in self.gesture_class_1:
+                    if torch.equal(seq, normalized_sequence):
+                        self.gesture_class_1.remove(seq)
+                        break
+
+            # Add to new buffer
+            if request.new_label == 0:
+                self.gesture_class_0.append(normalized_sequence)
+            else:
+                self.gesture_class_1.append(normalized_sequence)
+
+            # Set up sequence for retraining
             self.last_inference_sequence = sample.input_data.copy()
 
             # Create new training request with corrected label
             new_request = GestNet.Request()
             new_request.label = request.new_label
 
-            # Retrain with corrected label
+            # Train with corrected label
             train_response = self.train_gesture_callback(new_request, GestNet.Response())
             success = train_response.prediction >= 0
 
             # Log correction
             self.logger.log_correction('binary_gesture', 
-                                     request.old_label,
-                                     request.new_label, 
-                                     success)
+                                    sample.label,
+                                    request.new_label, 
+                                    success)
 
             response.success = success
             response.message = "Correction applied successfully"
@@ -1010,41 +1102,59 @@ class NetworkNode(Node):
     def correct_complex_gesture_callback(self, request, response):
         """Handle correction requests for complex gesture network."""
         try:
-            # Restore previous state
-            sample = self._restore_training_state('complex_gesture')
+            # Get previous state (but don't restore it)
+            sample = self.last_training_samples['complex_gesture']
             if sample is None:
                 response.success = False
                 response.message = "No previous training sample found"
                 return response
 
-            if request.old_label != sample.label:
+            # Process sequence for buffer storage
+            sequence_tensor = self.process_sensor_data(sample.input_data)
+            if sequence_tensor is None:
                 response.success = False
-                response.message = "Old label doesn't match last training"
+                response.message = "Failed to process sequence data"
                 return response
 
-            # Recreate last sequence
+            normalized_sequence = self.normalize_sequence(sequence_tensor)
+
+            old_class_idx = request.old_label
+            new_class_idx = request.new_label
+
+            # Remove from old buffer
+            old_buffer = self.complex_gesture_buffers[old_class_idx]
+            for seq in old_buffer:
+                if torch.equal(seq, normalized_sequence):
+                    old_buffer.remove(seq)
+                    break
+
+            # Add to new buffer
+            self.complex_gesture_buffers[new_class_idx].append(normalized_sequence)
+
+            # Set up sequence for retraining
             self.last_inference_sequence = sample.input_data.copy()
 
             # Create new training request with corrected label
             new_request = GestNet.Request()
             new_request.label = request.new_label
 
-            # Retrain with corrected label
+            # Train with corrected label
             train_response = self.train_complex_gesture_callback(
                 new_request, GestNet.Response())
             success = train_response.prediction >= 0
 
             # Log correction
             self.logger.log_correction('complex_gesture', 
-                                     request.old_label,
-                                     request.new_label, 
-                                     success)
+                                    sample.label,
+                                    request.new_label, 
+                                    success)
 
             response.success = success
             response.message = "Correction applied successfully"
             return response
 
         except Exception as e:
+            self.get_logger().error(f"Error in correct_complex_gesture: {str(e)}")
             response.success = False
             response.message = f"Error applying correction: {str(e)}"
             return response

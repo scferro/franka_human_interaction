@@ -1,23 +1,9 @@
-"""
-Enhanced Human Input node with GUI for sorting decisions and model saving.
-Supports both binary (yes/no) and categorical (0-3) decisions.
-
-PUBLISHERS:
-    + human_sorting (std_msgs/Int8) - Decision value:
-        - Binary mode: 0 (No) or 1 (Yes)
-        - Categorical mode: 0-3 representing different categories
-
-CLIENTS:
-    + save_sorting_network (SaveModel) - Service to save sorting network
-    + save_gesture_network (SaveModel) - Service to save gesture network
-"""
-
 import rclpy
 from rclpy.node import Node
 import tkinter as tk
 from tkinter import ttk, messagebox
 from std_msgs.msg import Int8
-from franka_hri_interfaces.srv import SaveModel
+from franka_hri_interfaces.srv import SaveModel, CorrectionService
 import threading
 
 class HumanInputGUI(Node):
@@ -31,6 +17,19 @@ class HumanInputGUI(Node):
         # Create service clients
         self.save_sorting_client = self.create_client(SaveModel, 'save_sorting_network')
         self.save_gesture_client = self.create_client(SaveModel, 'save_gesture_network')
+        self.save_complex_gesture_client = self.create_client(SaveModel, 'save_complex_gesture_network')
+        
+        # Create correction service clients
+        self.correct_sorting_client = self.create_client(CorrectionService, 'correct_sorting')
+        self.correct_gesture_client = self.create_client(CorrectionService, 'correct_gesture')
+        self.correct_complex_gesture_client = self.create_client(CorrectionService, 'correct_complex_gesture')
+        
+        # State tracking for corrections
+        self.last_predictions = {
+            'sorting': None,
+            'gesture': None,
+            'complex_gesture': None
+        }
         
         # Initialize GUI
         self.root = tk.Tk()
@@ -54,93 +53,16 @@ class HumanInputGUI(Node):
         style.configure('Category.TButton', padding=10)
         
         # Create main frames
-        binary_frame = ttk.LabelFrame(
-            self.root, 
-            text="Binary Decision (Yes/No)", 
-            padding="10"
-        )
-        binary_frame.grid(
-            row=0, column=0, columnspan=2, 
-            padx=10, pady=5, sticky="nsew"
-        )
+        binary_frame = self.create_binary_frame()
+        category_frame = self.create_category_frame()
+        correction_frame = self.create_correction_frame()
+        save_frame = self.create_save_frame()
         
-        category_frame = ttk.LabelFrame(
-            self.root, 
-            text="Category Decision (0-3)", 
-            padding="10"
-        )
-        category_frame.grid(
-            row=1, column=0, columnspan=2, 
-            padx=10, pady=5, sticky="nsew"
-        )
-        
-        save_frame = ttk.LabelFrame(
-            self.root, 
-            text="Save Models", 
-            padding="10"
-        )
-        save_frame.grid(
-            row=2, column=0, columnspan=2, 
-            padx=10, pady=5, sticky="nsew"
-        )
-
-        # Binary decision buttons
-        yes_btn = ttk.Button(
-            binary_frame, 
-            text="Yes (1)", 
-            style='Correct.TButton',
-            command=lambda: self.publish_decision(1, 'binary')
-        )
-        yes_btn.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
-        
-        no_btn = ttk.Button(
-            binary_frame, 
-            text="No (0)", 
-            style='Wrong.TButton',
-            command=lambda: self.publish_decision(0, 'binary')
-        )
-        no_btn.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
-
-        # Add explanatory label for binary mode
-        binary_label = ttk.Label(
-            binary_frame,
-            text="Use for simple yes/no decisions",
-            font=('TkDefaultFont', 9, 'italic')
-        )
-        binary_label.grid(row=1, column=0, columnspan=2, pady=(0, 5))
-
-        # Category decision buttons
-        for i in range(4):
-            btn = ttk.Button(
-                category_frame,
-                text=f"Category {i}",
-                style='Category.TButton',
-                command=lambda x=i: self.publish_decision(x, 'category')
-            )
-            btn.grid(row=0, column=i, padx=5, pady=5, sticky="ew")
-
-        # Add explanatory label for category mode
-        category_label = ttk.Label(
-            category_frame,
-            text="Use for multi-category decisions",
-            font=('TkDefaultFont', 9, 'italic')
-        )
-        category_label.grid(row=1, column=0, columnspan=4, pady=(0, 5))
-        
-        # Save model buttons
-        save_sorting_btn = ttk.Button(
-            save_frame,
-            text="Save Sorting Network",
-            command=self.save_sorting_network
-        )
-        save_sorting_btn.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
-        
-        save_gesture_btn = ttk.Button(
-            save_frame,
-            text="Save Gesture Network",
-            command=self.save_gesture_network
-        )
-        save_gesture_btn.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        # Add frames to main window
+        binary_frame.grid(row=0, column=0, columnspan=2, padx=10, pady=5, sticky="nsew")
+        category_frame.grid(row=1, column=0, columnspan=2, padx=10, pady=5, sticky="nsew")
+        correction_frame.grid(row=2, column=0, columnspan=2, padx=10, pady=5, sticky="nsew")
+        save_frame.grid(row=3, column=0, columnspan=2, padx=10, pady=5, sticky="nsew")
         
         # Status label with improved visibility
         self.status_label = ttk.Label(
@@ -150,18 +72,191 @@ class HumanInputGUI(Node):
             background='light gray',
             padding=5
         )
-        self.status_label.grid(
-            row=3, column=0, columnspan=2, 
-            padx=5, pady=5, sticky="ew"
+        self.status_label.grid(row=4, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
+
+    def create_binary_frame(self):
+        """Create frame for binary decisions."""
+        frame = ttk.LabelFrame(self.root, text="Binary Decision (Yes/No)", padding="10")
+        
+        yes_btn = ttk.Button(
+            frame, 
+            text="Yes (1)", 
+            style='Correct.TButton',
+            command=lambda: self.publish_decision(1, 'binary')
         )
+        yes_btn.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
+        
+        no_btn = ttk.Button(
+            frame, 
+            text="No (0)", 
+            style='Wrong.TButton',
+            command=lambda: self.publish_decision(0, 'binary')
+        )
+        no_btn.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        
+        ttk.Label(
+            frame,
+            text="Use for simple yes/no decisions",
+            font=('TkDefaultFont', 9, 'italic')
+        ).grid(row=1, column=0, columnspan=2, pady=(0, 5))
+        
+        return frame
+
+    def create_category_frame(self):
+        """Create frame for category decisions."""
+        frame = ttk.LabelFrame(self.root, text="Category Decision (0-3)", padding="10")
+        
+        for i in range(4):
+            btn = ttk.Button(
+                frame,
+                text=f"Category {i}",
+                style='Category.TButton',
+                command=lambda x=i: self.publish_decision(x, 'category')
+            )
+            btn.grid(row=0, column=i, padx=5, pady=5, sticky="ew")
+        
+        ttk.Label(
+            frame,
+            text="Use for multi-category decisions",
+            font=('TkDefaultFont', 9, 'italic')
+        ).grid(row=1, column=0, columnspan=4, pady=(0, 5))
+        
+        return frame
+
+    def create_correction_frame(self):
+        """Create frame for correction controls."""
+        frame = ttk.LabelFrame(self.root, text="Corrections", padding="10")
+        
+        # Network selection
+        ttk.Label(frame, text="Network:").grid(row=0, column=0, padx=5, pady=5)
+        self.network_var = tk.StringVar(value="sorting")
+        network_combo = ttk.Combobox(
+            frame, 
+            textvariable=self.network_var,
+            values=["sorting", "gesture", "complex_gesture"],
+            state="readonly"
+        )
+        network_combo.grid(row=0, column=1, padx=5, pady=5)
+        
+        # Old label entry
+        ttk.Label(frame, text="Old Label:").grid(row=1, column=0, padx=5, pady=5)
+        self.old_label_var = tk.StringVar()
+        old_label_entry = ttk.Entry(
+            frame, 
+            textvariable=self.old_label_var,
+            width=10
+        )
+        old_label_entry.grid(row=1, column=1, padx=5, pady=5)
+        
+        # New label entry
+        ttk.Label(frame, text="New Label:").grid(row=1, column=2, padx=5, pady=5)
+        self.new_label_var = tk.StringVar()
+        new_label_entry = ttk.Entry(
+            frame, 
+            textvariable=self.new_label_var,
+            width=10
+        )
+        new_label_entry.grid(row=1, column=3, padx=5, pady=5)
+        
+        # Apply correction button
+        apply_btn = ttk.Button(
+            frame,
+            text="Apply Correction",
+            command=self.apply_correction
+        )
+        apply_btn.grid(row=2, column=0, columnspan=4, pady=10)
+        
+        return frame
+
+    def create_save_frame(self):
+        """Create frame for save controls."""
+        frame = ttk.LabelFrame(self.root, text="Save Models", padding="10")
+        
+        save_sorting_btn = ttk.Button(
+            frame,
+            text="Save Sorting Network",
+            command=self.save_sorting_network
+        )
+        save_sorting_btn.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
+        
+        save_gesture_btn = ttk.Button(
+            frame,
+            text="Save Gesture Network",
+            command=self.save_gesture_network
+        )
+        save_gesture_btn.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        
+        save_complex_gesture_btn = ttk.Button(
+            frame,
+            text="Save Complex Gesture Network",
+            command=self.save_complex_gesture_network
+        )
+        save_complex_gesture_btn.grid(row=0, column=2, padx=5, pady=5, sticky="ew")
+        
+        return frame
+
+    def apply_correction(self):
+        """Apply correction to selected network."""
+        try:
+            network_type = self.network_var.get()
+            
+            # Get the new label from the entry field
+            new_label = int(self.new_label_var.get())
+            
+            # Use the predicted label as the old label
+            old_label = int(self.old_label_var.get())
+            
+            # Select appropriate service client
+            if network_type == 'sorting':
+                client = self.correct_sorting_client
+            elif network_type == 'gesture':
+                client = self.correct_gesture_client
+            else:  # complex_gesture
+                client = self.correct_complex_gesture_client
+                
+            # Create and send correction request
+            request = CorrectionService.Request()
+            request.old_label = old_label
+            request.new_label = new_label
+            
+            if not client.wait_for_service(timeout_sec=1.0):
+                self.status_label.config(text=f"Correction service for {network_type} not available")
+                return
+                
+            future = client.call_async(request)
+            future.add_done_callback(
+                lambda f: self.handle_correction_response(f, network_type))
+            
+            self.status_label.config(text=f"Applying correction to {network_type} network...")
+            
+        except ValueError:
+            messagebox.showerror("Error", "Labels must be valid integers")
+        except Exception as e:
+            messagebox.showerror("Error", f"Error applying correction: {str(e)}")
+
+    def handle_correction_response(self, future, network_type):
+        """Handle response from correction service."""
+        try:
+            response = future.result()
+            if response.success:
+                self.root.after(0, lambda: self.status_label.config(
+                    text=f"Successfully corrected {network_type} network"
+                ))
+            else:
+                self.root.after(0, lambda: self.status_label.config(
+                    text=f"Failed to correct {network_type} network: {response.message}"
+                ))
+        except Exception as e:
+            self.root.after(0, lambda: self.status_label.config(
+                text=f"Error in correction: {str(e)}"
+            ))
 
     def publish_decision(self, decision, mode):
-        """Publish decision with appropriate feedback based on mode."""
+        """Publish decision with appropriate feedback."""
         msg = Int8()
         msg.data = decision
         self.sorting_pub.publish(msg)
         
-        # Provide appropriate feedback based on mode
         if mode == 'binary':
             status_text = f"Published binary decision: {'Yes' if decision == 1 else 'No'} ({decision})"
         else:
@@ -171,65 +266,49 @@ class HumanInputGUI(Node):
         self.get_logger().info(status_text)
 
     def save_sorting_network(self):
-        """Call service to save sorting network."""
-        if not self.save_sorting_client.wait_for_service(timeout_sec=1.0):
-            messagebox.showerror(
-                "Error", 
-                "Save sorting network service not available"
-            )
-            return
-            
-        request = SaveModel.Request()
-        future = self.save_sorting_client.call_async(request)
-        future.add_done_callback(self.handle_save_sorting_response)
-        self.status_label.config(text="Saving sorting network...")
+        """Save sorting network."""
+        self.save_network('sorting')
 
     def save_gesture_network(self):
-        """Call service to save gesture network."""
-        if not self.save_gesture_client.wait_for_service(timeout_sec=1.0):
+        """Save gesture network."""
+        self.save_network('gesture')
+
+    def save_complex_gesture_network(self):
+        """Save complex gesture network."""
+        self.save_network('complex_gesture')
+
+    def save_network(self, network_type):
+        """Generic network saving function."""
+        client = getattr(self, f'save_{network_type}_client')
+        
+        if not client.wait_for_service(timeout_sec=1.0):
             messagebox.showerror(
                 "Error", 
-                "Save gesture network service not available"
+                f"Save {network_type} network service not available"
             )
             return
             
         request = SaveModel.Request()
-        future = self.save_gesture_client.call_async(request)
-        future.add_done_callback(self.handle_save_gesture_response)
-        self.status_label.config(text="Saving gesture network...")
+        future = client.call_async(request)
+        future.add_done_callback(
+            lambda f: self.handle_save_response(f, network_type))
+        self.status_label.config(text=f"Saving {network_type} network...")
 
-    def handle_save_sorting_response(self, future):
-        """Handle response from save sorting service."""
+    def handle_save_response(self, future, network_type):
+        """Handle response from save service."""
         try:
             response = future.result()
             if response.success:
                 self.root.after(0, lambda: self.status_label.config(
-                    text=f"Sorting network saved to: {response.filepath}"
+                    text=f"{network_type.title()} network saved to: {response.filepath}"
                 ))
             else:
                 self.root.after(0, lambda: messagebox.showerror(
-                    "Error", "Failed to save sorting network"
+                    "Error", f"Failed to save {network_type} network"
                 ))
         except Exception as e:
             self.root.after(0, lambda: messagebox.showerror(
-                "Error", f"Error saving sorting network: {str(e)}"
-            ))
-
-    def handle_save_gesture_response(self, future):
-        """Handle response from save gesture service."""
-        try:
-            response = future.result()
-            if response.success:
-                self.root.after(0, lambda: self.status_label.config(
-                    text=f"Gesture network saved to: {response.filepath}"
-                ))
-            else:
-                self.root.after(0, lambda: messagebox.showerror(
-                    "Error", "Failed to save gesture network"
-                ))
-        except Exception as e:
-            self.root.after(0, lambda: messagebox.showerror(
-                "Error", f"Error saving gesture network: {str(e)}"
+                "Error", f"Error saving {network_type} network: {str(e)}"
             ))
 
     def ros_spin(self):
@@ -242,7 +321,6 @@ class HumanInputGUI(Node):
         try:
             self.root.mainloop()
         finally:
-            # Clean up
             self.destroy_node()
 
 def main(args=None):
@@ -255,7 +333,6 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        # Ensure proper cleanup
         rclpy.shutdown()
 
 if __name__ == '__main__':

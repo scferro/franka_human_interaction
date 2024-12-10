@@ -327,7 +327,7 @@ private:
             double sort_pred = get_network_prediction(i);
             RCLCPP_INFO(this->get_logger(), "Sort prediction: %f", sort_pred);
             
-            const double CONFIDENCE_THRESHOLD = 0.7;
+            const double CONFIDENCE_THRESHOLD = 0.75;
             int predicted_category = static_cast<int>(sort_pred);
             bool high_confidence = (sort_pred - predicted_category) > CONFIDENCE_THRESHOLD;
             int final_category;
@@ -346,29 +346,32 @@ private:
                 
                 if (simple_gesture_pred >= 0.5) {
                     final_category = predicted_category;
-                } else {
-                    // Move to center for complex gesture
-                    auto center_pose = overhead_scan_pose;
-                    center_pose.pose.position.z = 0.3;
-                    move_to_pose(center_pose, planning_time, vel_factor, accel_factor);
-                    
-                    std::this_thread::sleep_for(std::chrono::milliseconds(800));
-                    complex_gesture_pred = get_complex_gesture_prediction();
-                    final_category = static_cast<int>(complex_gesture_pred);
                 }
-            } else {
-                // Low confidence - get complex gesture input immediately
+            }
+
+            while (simple_gesture_pred < 0.5 && simple_gesture_pred >= 0.0) {
+                // Low confidence or wrong initial sorting - get complex gesture input
                 auto center_pose = overhead_scan_pose;
                 center_pose.pose.position.z = 0.3;
                 move_to_pose(center_pose, planning_time, vel_factor, accel_factor);
                 
                 std::this_thread::sleep_for(std::chrono::milliseconds(800));
                 complex_gesture_pred = get_complex_gesture_prediction();
-                final_category = static_cast<int>(complex_gesture_pred);
-            }
+                predicted_category = static_cast<int>(complex_gesture_pred);
 
-            if (final_category < 0 || final_category > 3) {
-              final_category = predicted_category;
+                // Move to predicted pile position
+                auto wait_pose = get_pile_pose(predicted_category);
+                wait_pose.pose.position.z += 0.2;
+                move_to_pose(wait_pose, planning_time, vel_factor, accel_factor);
+                
+                // Get binary gesture confirmation
+                std::this_thread::sleep_for(std::chrono::milliseconds(800));
+                simple_gesture_pred = get_gesture_prediction();
+                
+                if (simple_gesture_pred >= 0.5) {
+                    final_category = predicted_category;
+                }
+
             }
             
             place_in_stack(i, final_category);
@@ -376,9 +379,8 @@ private:
 
             // Train networks based on actual results
             if (simple_gesture_pred != -1) {
-                // Simple gesture was used - train it with whether its prediction matched the final outcome
-                bool was_prediction_correct = (simple_gesture_pred >= 0.5) == (final_category == predicted_category);
-                train_gesture_network(was_prediction_correct);
+                // If simple gesture was used, train assuming last gesture would be correct (true)
+                train_gesture_network(true);
             }
             
             if (complex_gesture_pred != -1) {
