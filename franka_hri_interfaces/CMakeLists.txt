@@ -19,16 +19,13 @@ find_package(visualization_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "action/EmptyAction.action"
   "action/PoseAction.action"
-  "action/DoActionModel.action"
   "srv/CreateBox.srv"
   "srv/UpdateMarkers.srv"
   "srv/SortNet.srv"
   "srv/GestNet.srv"
-  "srv/VLAService.srv"
   "srv/SaveModel.srv"
   "srv/CorrectionService.srv"
   "srv/MoveBlock.srv"
-  "msg/EECommand.msg"
   "msg/BlockPlacementInfo.msg"
 DEPENDENCIES geometry_msgs franka_msgs visualization_msgs
 )
