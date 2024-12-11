@@ -220,47 +220,45 @@ class Blocks(Node):
 
     async def get_network_prediction_callback(self, request, response):
         block_index = request.index
-        images = self.block_images[block_index]
-        predictions = []
+        image = self.block_images[block_index][-1]
+        prediction = None
 
         self.get_logger().info("Received prediction request.")
 
-        # Get prediction for each image
-        for img in images:
-            try:
-                self.get_logger().info("Converting image.")
-                rgb_image = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) 
-                ros_msg = self.bridge.cv2_to_imgmsg(rgb_image, encoding='rgb8')
+        # Get prediction for image
+        try:
+            self.get_logger().info("Converting image.")
+            rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB) 
+            ros_msg = self.bridge.cv2_to_imgmsg(rgb_image, encoding='rgb8')
 
-                self.get_logger().info("Sending request.")
-                req = SortNet.Request()
-                req.image = ros_msg
+            self.get_logger().info("Sending request.")
+            req = SortNet.Request()
+            req.image = ros_msg
+            
+            # Send request
+            future = self.get_sorting_prediction_client.call_async(req)
+            
+            try:
+                # Wait for result using await - non-blocking
+                result = await future
                 
-                # Send request
-                future = self.get_sorting_prediction_client.call_async(req)
-                
-                try:
-                    # Wait for result using await - non-blocking
-                    result = await future
-                    
-                    if result is not None:
-                        pred = result.prediction
-                        predictions.append(pred)
-                        self.get_logger().info(f"Got prediction: {pred}")
-                    else:
-                        self.get_logger().warn("Received null response from prediction service")
-                        
-                except Exception as e:
-                    self.get_logger().error(f"Error waiting for prediction result: {str(e)}")
-                    continue
+                if result is not None:
+                    pred = result.prediction
+                    prediction = pred
+                    self.get_logger().info(f"Got prediction: {pred}")
+                else:
+                    self.get_logger().warn("Received null response from prediction service")
                     
             except Exception as e:
-                self.get_logger().error(f"Error in prediction request: {str(e)}")
+                self.get_logger().error(f"Error waiting for prediction result: {str(e)}")
+                
+        except Exception as e:
+            self.get_logger().error(f"Error in prediction request: {str(e)}")
                 
         # Return average prediction
-        if predictions:
-            response.prediction = float(np.mean(predictions))
-            self.get_logger().info(f"Final prediction (average of {len(predictions)} predictions): {response.prediction}")
+        if prediction != None:
+            response.prediction = float(prediction)
+            self.get_logger().info(f"Final prediction: {response.prediction}")
         else:
             response.prediction = -1.0
             self.get_logger().warn("No predictions received")
@@ -373,7 +371,7 @@ class Blocks(Node):
         hsv_image = cv2.cvtColor(img_copy, cv2.COLOR_BGR2HSV)
 
         # Define the color range for the objects you want to segment (adjust as needed)
-        lower_color = np.array([0, 50, 50])  
+        lower_color = np.array([0, 60, 60])  
         upper_color = np.array([180, 255, 255]) 
 
         # Create a binary mask based on the color range
@@ -384,7 +382,7 @@ class Blocks(Node):
 
         # Perform morphological operations to merge nearby regions
         kernel = np.ones((7,7), np.uint8)
-        kernel2 = np.ones((13,13), np.uint8)
+        kernel2 = np.ones((11,11), np.uint8)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)  # Close small gaps
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel2)   # Remove noise
 

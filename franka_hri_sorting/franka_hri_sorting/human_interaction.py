@@ -109,6 +109,9 @@ class HumanInteraction(Node):
             self.marker_array_callback,
             10
         )
+
+        # Create hands callback group
+        self.hand_callback_group = rclpy.callback_groups.MutuallyExclusiveCallbackGroup()
         
         # Create publishers and service clients
         self.hands_detected_pub = self.create_publisher(Bool, 'hands_detected', 10)
@@ -158,6 +161,8 @@ class HumanInteraction(Node):
         self.tf_timer = self.create_timer(0.1, self.broadcast_stored_transform)
         viz_period = 1.0 / self.get_parameter('visualization_rate').value
         self.viz_timer = self.create_timer(viz_period, self.publish_visualization)
+        self.monitoring_timeout = 3.0  # Seconds to keep monitoring after hands leave
+        self.reset_timer = None
         
         self.get_logger().info('Human Interaction node initialized')
 
@@ -264,15 +269,17 @@ class HumanInteraction(Node):
         """Use MediaPipe to detect hands and manage interaction monitoring."""
         if self.last_color_frame is None:
             return
-            
-        # Convert BGR to RGB for MediaPipe
+                
         rgb_frame = cv2.cvtColor(self.last_color_frame, cv2.COLOR_BGR2RGB)
         results = self.hands.process(rgb_frame)
-        
-        # Handle hand detection state changes
         hands_present = results.multi_hand_landmarks is not None
         
         if hands_present:
+            # Cancel any pending reset when hands are detected
+            if self.reset_timer is not None:
+                self.reset_timer.cancel()
+                self.reset_timer = None
+                
             if self.pre_interaction_color is None:
                 # Save frames from just before hands appeared
                 self.pre_interaction_color = self.last_color_frame.copy()
@@ -283,11 +290,62 @@ class HumanInteraction(Node):
             if self.pre_interaction_color is not None:
                 # Hands were present but now gone - check for changes
                 time.sleep(1)
-                self.detect_block_movement()
-                self.pre_interaction_color = None
-                self.pre_interaction_depth = None
+                changes_detected, max_change_region = self.detect_block_movement()
+                
+                if changes_detected and max_change_region is not None:
+                    # Clear pre-interaction state
+                    self.pre_interaction_color = None
+                    self.pre_interaction_depth = None
+                    
+                    # Call move block service to update stack tracking
+                    move_request = MoveBlock.Request()
+                    move_request.block_index = self.current_block_index
+                    move_request.new_category = max_change_region - 1  # Categories are 0-based
+                    
+                    try:
+                        # Use callback group for service calls
+                        future = self.move_block_client.call_async(move_request)
+                        
+                        # Create correction requests
+                        sort_correction = CorrectionService.Request()
+                        sort_correction.old_label = self.current_block_info.last_block_category
+                        sort_correction.new_label = max_change_region - 1
+                        
+                        complex_gesture_correction = CorrectionService.Request()
+                        complex_gesture_correction.old_label = self.current_block_info.last_block_category
+                        complex_gesture_correction.new_label = max_change_region - 1
+                        
+                        gesture_correction = CorrectionService.Request()
+                        gesture_correction.old_label = 0
+                        gesture_correction.new_label = 0
+                        
+                        # Send correction service requests
+                        self.sort_correction_client.call_async(sort_correction)
+                        self.gesture_correction_client.call_async(gesture_correction)
+                        self.complex_gesture_correction_client.call_async(complex_gesture_correction)
+                        
+                        self.get_logger().info('Changes detected - clearing pre-interaction state and updating stack tracking')
+                        
+                    except Exception as e:
+                        self.get_logger().error(f'Error updating stack tracking: {str(e)}')
+                else:
+                    # Start a timer to reset if no changes detected
+                    if self.reset_timer is None:
+                        self.reset_timer = self.create_timer(
+                            self.monitoring_timeout,
+                            self.reset_monitoring_state
+                        )
+                        self.get_logger().info('No immediate changes detected - starting reset timer')
+                
                 self.hands_detected_pub.publish(Bool(data=False))
-                self.get_logger().info('Hands removed - checking for block movement')
+
+
+    def reset_monitoring_state(self):
+        """Reset the monitoring state if no changes were detected."""
+        self.pre_interaction_color = None
+        self.pre_interaction_depth = None
+        self.reset_timer = None
+        self.get_logger().info('Monitoring timeout reached - resetting state')
 
     def transform_positions_to_camera(self, block_info):
         """Transform world frame positions to camera optical frame coordinates."""
@@ -360,11 +418,41 @@ class HumanInteraction(Node):
         return int(pixel[0]), int(pixel[1])
 
     def get_monitoring_regions(self, positions):
-        """Convert 3D positions to 2D pixel regions for monitoring."""
+        """Convert 3D positions to 2D pixel regions for monitoring, excluding the next position
+        in the current stack.
+        
+        Args:
+            positions: List of Pose objects, where first is current block position and rest
+                    are possible next positions.
+        Returns:
+            List of monitoring region dictionaries.
+        """
         regions = []
         half_size = self.monitoring_window_size // 2
         
-        for position in positions:
+        # First, identify which positions we actually want to monitor
+        positions_to_monitor = []
+        
+        # Always monitor the current block position (first position)
+        positions_to_monitor.append(positions[0])
+        
+        # For the remaining positions (next possible positions)
+        for i, position in enumerate(positions[1:], 1):
+            # Get stack index for this position (i-1 since categories are 0-based)
+            position_category = i - 1
+            
+            # Skip if this position is in the same stack as the current block
+            if position_category == self.current_block_info.last_block_category:
+                self.get_logger().info(
+                    f'Skipping monitoring of position in current stack '
+                    f'(category {position_category})'
+                )
+                continue
+                
+            positions_to_monitor.append(position)
+        
+        # Now create monitoring regions for the positions we want to track
+        for position in positions_to_monitor:
             pixel_coords = self.project_to_image(position)
             if pixel_coords:
                 x, y = pixel_coords
@@ -386,10 +474,46 @@ class HumanInteraction(Node):
                         region['height'] = height - region['y']
                 
                 regions.append(region)
+        
         return regions
 
-    async def detect_block_movement(self):
-        """Compare pre and post interaction frames to detect block movement and update tracking."""
+    def detect_region_change(self, region, expect_addition=False):
+        """Detect significant depth changes in the specified region."""
+        pre_depth = self.get_region_depth(self.pre_interaction_depth, region)
+        post_depth = self.get_region_depth(self.last_depth_frame, region)
+        
+        # Skip if either depth measurement is invalid
+        if pre_depth == 0.0 or post_depth == 0.0:
+            return False
+        
+        # Calculate depth change
+        depth_change = post_depth - pre_depth
+        
+        # Log the depth change for debugging
+        self.get_logger().debug(
+            f'Depth change: {depth_change:.3f}m '
+            f'(pre: {pre_depth:.3f}m, post: {post_depth:.3f}m)'
+        )
+        
+        if expect_addition:
+            detected = depth_change < -self.depth_change_threshold
+        else:
+            detected = depth_change > self.depth_change_threshold
+            
+        if detected:
+            self.get_logger().info(
+                f'{"Addition" if expect_addition else "Removal"} '
+                f'detected with depth change of {depth_change:.3f}m'
+            )
+            
+        return detected
+
+    def detect_block_movement(self):
+        """Compare pre and post interaction frames to detect block movement and update tracking.
+        Returns:
+            tuple: (changes_detected, max_change_region) where changes_detected is a boolean and
+                max_change_region is the index of the region with the largest change or None.
+        """
         # Check if all required data is available
         required_data = [
             self.pre_interaction_color is not None,
@@ -403,67 +527,32 @@ class HumanInteraction(Node):
         ]
         
         if not all(required_data):
-            return
-            
+            return False, None
+                
         # First region is the original block position
         original_region = self.monitoring_regions[0]
         
         # Check if block was removed from original position
-        if self.detect_region_change(original_region):
-            # Check all possible destination positions
-            for i, region in enumerate(self.monitoring_regions[1:], 1):
-                if self.detect_region_change(region, expect_addition=True):
-                    old_category = self.current_block_info.last_block_category
-                    new_category = i-1  # Categories are 0-based
-                    self.get_logger().info(f'Block {self.current_block_index} moved from category {old_category} to {new_category}')
-                    
-                    try:
-                        # Call move block service first
-                        move_request = MoveBlock.Request()
-                        move_request.block_index = self.current_block_index
-                        move_request.new_category = new_category
-                        
-                        move_future = self.move_block_client.call_async(move_request)
-                        
-                        # Create correction requests
-                        sort_correction = CorrectionService.Request()
-                        sort_correction.old_label = old_category
-                        sort_correction.new_label = new_category
-                        
-                        complex_gesture_correction = CorrectionService.Request()
-                        complex_gesture_correction.old_label = old_category
-                        complex_gesture_correction.new_label = new_category
-                        
-                        gesture_correction = CorrectionService.Request()
-                        gesture_correction.old_label = 0  # For binary gesture, old label doesn't matter
-                        gesture_correction.new_label = 0  # Always mark as incorrect classification
-                        
-                        # Call all correction services asynchronously
-                        sort_future = self.sort_correction_client.call_async(sort_correction)
-                        gesture_future = self.gesture_correction_client.call_async(gesture_correction)
-                        complex_future = self.complex_gesture_correction_client.call_async(complex_gesture_correction)
-                        
-                        # Wait for all services to complete
-                        try:
-                            await move_future
-                            sort_result = await sort_future
-                            gesture_result = await gesture_future
-                            complex_result = await complex_future
-                            
-                            # Log results
-                            self.get_logger().info(
-                                f"Correction results - Sorting: {sort_result.success}, "
-                                f"Gesture: {gesture_result.success}, "
-                                f"Complex Gesture: {complex_result.success}"
-                            )
-                        except Exception as e:
-                            self.get_logger().error(f"Error waiting for correction services: {str(e)}")
-                            
-                    except Exception as e:
-                        self.get_logger().error(f'Error calling correction services: {str(e)}')
-
-                    self.get_logger().info('Update complete')
-                    return
+        removal_detected = self.detect_region_change(original_region)
+        self.get_logger().info(f'Checking original position - removal detected: {removal_detected}')
+        
+        # Track which regions show addition
+        max_change_region = None
+        max_change = 0
+        
+        # Check all possible destination positions
+        for i, region in enumerate(self.monitoring_regions[1:], 1):
+            if self.detect_region_change(region, expect_addition=True):
+                pre_depth = self.get_region_depth(self.pre_interaction_depth, region)
+                post_depth = self.get_region_depth(self.last_depth_frame, region)
+                change = abs(post_depth - pre_depth)
+                
+                if change > max_change:
+                    max_change = change
+                    max_change_region = i
+                    self.get_logger().info(f'New max change detected in region {i} with change {change:.3f}m')
+        
+        return max_change_region is not None, max_change_region
 
     def get_region_depth(self, depth_image, region):
         """Calculate median depth in the specified region with resolution handling."""

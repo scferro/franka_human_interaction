@@ -192,7 +192,7 @@ def main():
     parser.add_argument(
         '--log-file',
         type=str,
-        default='/home/scferro/Documents/final_project/hri_data/logs/complex_gesture_predictions_20241205_141144.csv',
+        default='/home/scferro/Documents/final_project/hri_data/logs/gesture_predictions_20241210_205240.csv',
         help='Path to the specific log file to analyze'
     )
     
@@ -200,7 +200,7 @@ def main():
         '--network-type',
         type=str,
         choices=['sorting', 'gesture', 'complex_gesture'],
-        default='complex_gesture',
+        default='gesture',
         help='Type of network to analyze'
     )
     

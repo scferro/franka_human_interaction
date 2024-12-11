@@ -48,7 +48,11 @@ public:
         
     markers_callback_group_ = this->create_callback_group(
         rclcpp::CallbackGroupType::Reentrant);
-    prediction_callback_group_ = this->create_callback_group(
+    sorting_prediction_callback_group_ = this->create_callback_group(
+        rclcpp::CallbackGroupType::Reentrant);
+    gesture_prediction_callback_group_ = this->create_callback_group(
+        rclcpp::CallbackGroupType::Reentrant);
+    complex_gesture_prediction_callback_group_ = this->create_callback_group(
         rclcpp::CallbackGroupType::Reentrant);
 
     action_server_sort_blocks = rclcpp_action::create_server<franka_hri_interfaces::action::EmptyAction>(
@@ -89,24 +93,39 @@ public:
         std::bind(&ManipulateBlocks::human_sorting_callback, this, std::placeholders::_1)
     );
 
-    train_network_client = create_client<franka_hri_interfaces::srv::SortNet>("train_network");
+    train_network_client = create_client<franka_hri_interfaces::srv::SortNet>(
+        "train_network",
+        rmw_qos_profile_services_default,
+        sorting_prediction_callback_group_
+    );
     get_network_prediction_client = this->create_client<franka_hri_interfaces::srv::SortNet>(
         "get_network_prediction",
         rmw_qos_profile_services_default,
-        prediction_callback_group_
+        sorting_prediction_callback_group_
     );
 
     // Complex gesture clients
     get_complex_gesture_prediction_client = this->create_client<franka_hri_interfaces::srv::GestNet>(
         "get_complex_gesture_prediction",
         rmw_qos_profile_services_default,
-        prediction_callback_group_
+        complex_gesture_prediction_callback_group_
     );
-
     train_complex_gesture_client = this->create_client<franka_hri_interfaces::srv::GestNet>(
         "train_complex_gesture",
         rmw_qos_profile_services_default,
-        prediction_callback_group_
+        complex_gesture_prediction_callback_group_
+    );
+
+    // Gesture clients
+    get_gesture_prediction_client = this->create_client<franka_hri_interfaces::srv::GestNet>(
+        "get_gesture_prediction",
+        rmw_qos_profile_services_default,
+        gesture_prediction_callback_group_
+    );
+    train_gesture_client = this->create_client<franka_hri_interfaces::srv::GestNet>(
+        "train_gesture",
+        rmw_qos_profile_services_default,
+        gesture_prediction_callback_group_
     );
 
     pretrain_network_client = create_client<std_srvs::srv::Empty>("pretrain_network");
@@ -220,7 +239,7 @@ private:
   rclcpp::Service<std_srvs::srv::Empty>::SharedPtr pretrain_franka_srv;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr block_pub;
   rclcpp::CallbackGroup::SharedPtr markers_callback_group_;
-  rclcpp::CallbackGroup::SharedPtr prediction_callback_group_;
+  rclcpp::CallbackGroup::SharedPtr complex_gesture_prediction_callback_group_, gesture_prediction_callback_group_, sorting_prediction_callback_group_;
   rclcpp::Client<franka_hri_interfaces::srv::GestNet>::SharedPtr train_gesture_client;
   rclcpp::Client<franka_hri_interfaces::srv::GestNet>::SharedPtr train_complex_gesture_client;
   rclcpp::Client<franka_hri_interfaces::srv::GestNet>::SharedPtr get_gesture_prediction_client;
@@ -320,36 +339,35 @@ private:
       }
 
     for (std::vector<visualization_msgs::msg::Marker>::size_type i = 0; i < (block_markers.markers.size()); i++) {
+        // For a vector of integers
+        for (size_t i = 0; i < sorted_index.size(); i++) {
+            RCLCPP_INFO(this->get_logger(), "Sorted Indices[%zu]: %d", i, sorted_index[i]);
+        }
+        double simple_gesture_pred = -1;  // Track if simple gesture was used
+        double complex_gesture_pred = -1;  // Track if complex gesture was used
+        int final_category;
         if (std::find(sorted_index.begin(), sorted_index.end(), i) == sorted_index.end()) {
             scan_block(i, true);
             grab_block(i);
 
             double sort_pred = get_network_prediction(i);
             RCLCPP_INFO(this->get_logger(), "Sort prediction: %f", sort_pred);
-            
-            const double CONFIDENCE_THRESHOLD = 0.75;
             int predicted_category = static_cast<int>(sort_pred);
-            bool high_confidence = (sort_pred - predicted_category) > CONFIDENCE_THRESHOLD;
-            int final_category;
-            double simple_gesture_pred = -1;  // Track if simple gesture was used
-            double complex_gesture_pred = -1;  // Track if complex gesture was used
+            final_category = predicted_category;
+
+            // Move to predicted pile position
+            auto wait_pose = get_pile_pose(predicted_category);
+            move_to_pose(wait_pose, planning_time, vel_factor, accel_factor);
             
-            if (high_confidence) {
-                // Move to predicted pile position
-                auto wait_pose = get_pile_pose(predicted_category);
-                wait_pose.pose.position.z += 0.2;
-                move_to_pose(wait_pose, planning_time, vel_factor, accel_factor);
-                
-                // Get binary gesture confirmation
-                std::this_thread::sleep_for(std::chrono::milliseconds(800));
-                simple_gesture_pred = get_gesture_prediction();
-                
-                if (simple_gesture_pred >= 0.5) {
-                    final_category = predicted_category;
-                }
+            // Get binary gesture confirmation
+            std::this_thread::sleep_for(std::chrono::milliseconds(800));
+            simple_gesture_pred = get_gesture_prediction();
+
+            if (simple_gesture_pred < 0.) {
+              simple_gesture_pred = 1.0;
             }
 
-            while (simple_gesture_pred < 0.5 && simple_gesture_pred >= 0.0) {
+            while (simple_gesture_pred < 0.5) {
                 // Low confidence or wrong initial sorting - get complex gesture input
                 auto center_pose = overhead_scan_pose;
                 center_pose.pose.position.z = 0.3;
@@ -357,48 +375,55 @@ private:
                 
                 std::this_thread::sleep_for(std::chrono::milliseconds(800));
                 complex_gesture_pred = get_complex_gesture_prediction();
-                predicted_category = static_cast<int>(complex_gesture_pred);
+                auto gesture_predicted_category = static_cast<int>(complex_gesture_pred);
+
+                if (gesture_predicted_category < 0.) {
+                  gesture_predicted_category = predicted_category;
+                }
+
+                RCLCPP_INFO(this->get_logger(), "Gesture Category: %d", gesture_predicted_category);
 
                 // Move to predicted pile position
-                auto wait_pose = get_pile_pose(predicted_category);
-                wait_pose.pose.position.z += 0.2;
+                auto wait_pose = get_pile_pose(gesture_predicted_category);
                 move_to_pose(wait_pose, planning_time, vel_factor, accel_factor);
+                RCLCPP_INFO(this->get_logger(), "Moving to pose");
                 
                 // Get binary gesture confirmation
                 std::this_thread::sleep_for(std::chrono::milliseconds(800));
+                RCLCPP_INFO(this->get_logger(), "getting simple gesture");
                 simple_gesture_pred = get_gesture_prediction();
-                
-                if (simple_gesture_pred >= 0.5) {
-                    final_category = predicted_category;
+                RCLCPP_INFO(this->get_logger(), "escape!");
+
+                if (simple_gesture_pred < 0.) {
+                  simple_gesture_pred = 1.0;
                 }
+                
+                if (simple_gesture_pred >= 0.5 && gesture_predicted_category >= 0.) {
+                    final_category = gesture_predicted_category;
+                }
+              }
 
+              RCLCPP_INFO(this->get_logger(), "Final Sorting: %d", final_category);
+              
+              place_in_stack(i, final_category);
+              publish_placement_info(i, final_category);
+              
+              if (complex_gesture_pred > 0.) {
+                  // Complex gesture was used - train it with the actual final category
+                  train_complex_gesture_network(final_category);
+              }
+
+              // Train sorting network with final category
+              train_network(i, final_category);
+
+              sorted_index.push_back(i);
+              move_to_joints(home_joint_positions);
             }
-            
-            place_in_stack(i, final_category);
-            publish_placement_info(i, final_category);
-
-            // Train networks based on actual results
-            if (simple_gesture_pred != -1) {
-                // If simple gesture was used, train assuming last gesture would be correct (true)
-                train_gesture_network(true);
-            }
-            
-            if (complex_gesture_pred != -1) {
-                // Complex gesture was used - train it with the actual final category
-                train_complex_gesture_network(final_category);
-            }
-
-            // Train sorting network with final category
-            train_network(i, final_category);
-
-            sorted_index.push_back(i);
-            move_to_joints(home_joint_positions);
         }
+
+    move_to_joints(home_joint_positions);
     }
     
-    move_to_joints(home_joint_positions);
-}
-
 void update_piles_callback(
     const std::shared_ptr<franka_hri_interfaces::srv::MoveBlock::Request> request,
     std::shared_ptr<franka_hri_interfaces::srv::MoveBlock::Response> response)

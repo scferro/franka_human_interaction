@@ -470,7 +470,7 @@ class NetworkNode(Node):
         self.mod48_buffer = None
         self.combined_sequence = []
         self.last_inference_sequence = []
-        self.norm_values = np.ones(4)
+        self.norm_values = np.ones(50)
         self._load_norm_values()
 
     def _init_correction_state(self):
@@ -545,9 +545,9 @@ class NetworkNode(Node):
                 response.message = "No sequence data available"
                 return response
                 
-            sequence_array = np.array(self.combined_sequence)
-            # Get absolute maximum values for each column
-            self.norm_values = np.abs(sequence_array).max(axis=0)
+            sequence_array = np.array(self.combined_sequence)  # Shape: [seq_len, 200]
+            # Get absolute maximum values across sequence for each feature
+            self.norm_values = np.abs(sequence_array).max(axis=0)  # Shape: [200]
             self._save_norm_values()
             
             response.success = True
@@ -1276,7 +1276,8 @@ class NetworkNode(Node):
                 dtype=tensor_data.dtype
             )
             # Normalize using maximum values
-            normalized = tensor_data / norm_tensor.unsqueeze(0).unsqueeze(0)
+            norm_tensor = norm_tensor.view(1, -1, 1)
+            normalized = tensor_data / norm_tensor
             return normalized
         except Exception as e:
             self.get_logger().error(f"Error normalizing sequence: {e}")
@@ -1390,7 +1391,11 @@ class NetworkNode(Node):
             mod51_data = data.reshape(rows, cols)
             mod51_features = mod51_data[:, 1:]
             
-            combined_features = np.hstack((self.mod48_buffer, mod51_features))
+            # Flatten and combine features to match 200 total features
+            combined_features = mod51_features.flatten()
+            if self.mod48_buffer is not None:
+                mod48_features = self.mod48_buffer.flatten()
+                combined_features = np.concatenate([mod48_features, combined_features])
             
             self.combined_sequence.append(combined_features)
 
@@ -1399,7 +1404,7 @@ class NetworkNode(Node):
 
         except Exception as e:
             self.get_logger().error(f'Error processing modality 51 data: {str(e)}')
-
+            
 
 def main(args=None):
     """Main function to initialize and run the node."""
