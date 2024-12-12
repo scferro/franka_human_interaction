@@ -149,9 +149,13 @@ This is the primary operating mode where the robot actively sorts blocks while l
 With both the robot control and sorting system running, you can begin the sorting sequence by sending an action goal to the sort_blocks action server using `ros2 action send_goal /sort_blocks franka_hri_interfaces/action/EmptyAction "{}"`. This will trigger the robot to execute the block sorting routine with new blocks in the workspace.
 
 ## More Information
-For more information on this project, please see the repo and project portfolio post linked below.
+For more information on this project, please see the repo and project portfolio post linked below:
 
 [Portfolio Post](https://scferro.github.io/projects/05-ml-robot-sorting)
+
+Additionally, a sample of the data collected in the project can be found at the link below:
+
+[Data - Google Drive]([https://scferro.github.io/projects/05-ml-robot-sorting](https://drive.google.com/drive/folders/1R9Wt2iKjPnFkbv4xvzDKr16SuFiGmk7a?usp=sharing))
 
 ## License
 
