@@ -144,7 +144,7 @@ This method is particularly effective for establishing initial sorting preferenc
 
 ### Robot Sorting Mode
 
-This is the primary operating mode where the robot actively sorts blocks while learning from human feedback. The setup requires coordinating between the robot control station and your local development machine.
+This is the primary operating mode where the robot actively sorts blocks while learning from human feedback.
 
 With both the robot control and sorting system running, you can begin the sorting sequence by sending an action goal to the sort_blocks action server using `ros2 action send_goal /sort_blocks franka_hri_interfaces/action/EmptyAction "{}"`. This will trigger the robot to execute the block sorting routine with new blocks in the workspace.
 
