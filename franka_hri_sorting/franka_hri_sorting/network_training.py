@@ -1,3 +1,34 @@
+"""
+Network training node for interactive training of sorting and gesture recognition networks.
+
+This node manages the training process for sorting and gesture recognition networks,
+handling image display, user input, and network predictions. It supports different
+training modes and network types.
+
+PUBLISHERS:
+    + /user_notifications (std_msgs/String) - Notifications and prompts for the user
+
+SUBSCRIBERS:
+    + /human_sorting (std_msgs/Int8) - Human input for network training labels
+
+SERVICE CLIENTS:
+    + /train_sorting (franka_hri_interfaces/SortNet) - Client for training sorting network
+    + /get_sorting_prediction (franka_hri_interfaces/SortNet) - Client for sorting predictions
+    + /train_gesture (franka_hri_interfaces/GestNet) - Client for training binary gesture network
+    + /get_gesture_prediction (franka_hri_interfaces/GestNet) - Client for binary gesture predictions
+    + /train_complex_gesture (franka_hri_interfaces/GestNet) - Client for training complex gesture network
+    + /get_complex_gesture_prediction (franka_hri_interfaces/GestNet) - Client for complex gesture predictions
+
+PARAMETERS:
+    + training_mode (string) - Training mode ('sorting_only', 'gestures_only', 'both')
+    + gesture_network_type (string) - Type of gesture network ('binary', 'complex')
+    + training_images_path (string) - Path to training images directory
+    + display_time (float) - Time to display each training image (seconds)
+    + gesture_warning_time (float) - Warning time before gesture capture (seconds)
+    + prediction_timeout (float) - Timeout for prediction requests (seconds)
+"""
+
+
 import os
 import enum
 import random

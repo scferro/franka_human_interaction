@@ -13,10 +13,10 @@ def generate_launch_description():
     franka_moveit_config_dir = get_package_share_directory('franka_moveit_config')
 
     # Define all default directories
-    default_base_dir = '/home/scferro/Documents/final_project/hri_data'
+    default_base_dir = '/home/scferro/Documents/final_project'
     default_models_dir = os.path.join(default_base_dir, 'models')
     default_logs_dir = os.path.join(default_base_dir, 'logs')
-    default_training_images = os.path.join(default_base_dir, 'training_data/images')
+    default_training_images = os.path.join(default_base_dir, 'images_training/0patterns')
     default_training_data_save_dir = os.path.join(default_base_dir, 'training_data')
     rviz_config_file = os.path.join(franka_hri_sorting_dir, 'config', 'sorting.rviz')
     

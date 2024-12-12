@@ -1,3 +1,34 @@
+"""
+Main vision node for detecting and tracking blocks on a table.
+Detects blocks using depth and color segmentation, publishes their poses as markers,
+and provides services for block scanning and neural network training.
+
+PUBLISHERS:
+    + img_out (sensor_msgs/Image) - Publishes masked/processed images showing detected blocks
+    + blocks (visualization_msgs/MarkerArray) - Publishes detected block poses as markers
+
+SUBSCRIBERS:
+    + /camera/d405/color/image_rect_raw (sensor_msgs/Image) - RGB camera input
+    + /camera/d405/aligned_depth_to_color/image_raw (sensor_msgs/Image) - Depth camera input
+    + /camera/d405/aligned_depth_to_color/camera_info (sensor_msgs/CameraInfo) - Camera calibration info
+
+SERVICES:
+    + scan_overhead (franka_hri_interfaces/UpdateMarkers) - Service to scan for blocks from overhead view
+    + update_markers (franka_hri_interfaces/UpdateMarkers) - Service to update block marker poses
+    + pretrain_network (std_srvs/Empty) - Service to pretrain neural network on detected blocks
+    + reset_blocks (std_srvs/Empty) - Service to reset block detection and tracking
+    + train_network (franka_hri_interfaces/SortNet) - Service to train neural network on specific block
+    + get_network_prediction (franka_hri_interfaces/SortNet) - Service to get network prediction for a block
+
+SERVICE CLIENTS:
+    + train_sorting (franka_hri_interfaces/SortNet) - Client for training sorting network
+    + get_sorting_prediction (franka_hri_interfaces/SortNet) - Client for getting sorting predictions
+
+PARAMETERS:
+    + scan_position_x (float) - X-axis division position for block scanning
+"""
+
+
 import cv2
 import numpy as np
 from cv_bridge import CvBridge, CvBridgeError

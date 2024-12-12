@@ -1,3 +1,45 @@
+"""
+Node for monitoring human interaction with blocks and updating block positions.
+
+This node tracks block positions using a D435i camera, detects hand interactions, 
+and updates block stack tracking based on observed movements.
+
+PUBLISHERS:
+    + /hands_detected (std_msgs/Bool) - Indicates if hands are currently detected in frame
+    + /monitoring_visualization (sensor_msgs/Image) - Visualization of monitoring regions
+
+SUBSCRIBERS:
+    + {camera_info_topic} (sensor_msgs/CameraInfo) - Camera calibration information
+    + {color_topic} (sensor_msgs/Image) - RGB image from camera
+    + {depth_topic} (sensor_msgs/Image) - Depth image from camera
+    + /block_placement_info (franka_hri_interfaces/BlockPlacementInfo) - Information about block placements
+    + /blocks (visualization_msgs/MarkerArray) - Current block marker positions
+
+SERVICES:
+    + /localize_d435 (std_srvs/Trigger) - Service to localize D435 camera using AprilTag
+
+SERVICE CLIENTS:
+    + /update_piles (franka_hri_interfaces/MoveBlock) - Updates block stack tracking
+    + /correct_sorting (franka_hri_interfaces/CorrectionService) - Correction service for sorting
+    + /correct_gesture (franka_hri_interfaces/CorrectionService) - Correction service for gestures
+    + /correct_complex_gesture (franka_hri_interfaces/CorrectionService) - Correction service for complex gestures
+
+PARAMETERS:
+    + calibration_file (string) - Path to camera calibration file
+    + calibration_timeout (float) - Timeout for camera calibration in seconds
+    + camera_info_topic (string) - Topic for camera calibration info
+    + depth_topic (string) - Topic for depth image
+    + color_topic (string) - Topic for color image
+    + visualization_rate (float) - Rate in Hz for visualization updates
+    + monitoring_window_size (int) - Size of monitoring window in pixels
+    + depth_change_threshold (float) - Threshold for detecting depth changes in meters
+    + min_valid_depth_ratio (float) - Minimum ratio of valid depth pixels
+
+BROADCASTS:
+    + world -> d435i_link - Transform from world frame to D435 camera
+"""
+
+
 import rclpy
 from rclpy.node import Node
 from tf2_ros import TransformListener, Buffer, TransformBroadcaster, StaticTransformBroadcaster

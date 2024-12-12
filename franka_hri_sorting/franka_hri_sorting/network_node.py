@@ -1,3 +1,46 @@
+"""
+Neural network management node for training and inference with sorting and gesture networks.
+
+This node manages multiple neural networks for sorting and gesture recognition,
+handles training data collection, performs inference, and provides correction capabilities.
+
+PUBLISHERS:
+    None
+
+SUBSCRIBERS:
+    + /sensor_data/modality_48 (std_msgs/Float32MultiArray) - Sensor data from modality 48
+    + /sensor_data/modality_51 (std_msgs/Float32MultiArray) - Sensor data from modality 51
+
+SERVICES:
+    + /train_sorting (franka_hri_interfaces/SortNet) - Train sorting network with new data
+    + /train_gesture (franka_hri_interfaces/GestNet) - Train gesture network with new data
+    + /train_complex_gesture (franka_hri_interfaces/GestNet) - Train complex gesture network with new data
+    + /get_sorting_prediction (franka_hri_interfaces/SortNet) - Get prediction from sorting network
+    + /get_gesture_prediction (franka_hri_interfaces/GestNet) - Get prediction from gesture network
+    + /get_complex_gesture_prediction (franka_hri_interfaces/GestNet) - Get prediction from complex gesture network
+    + /save_sorting_network (franka_hri_interfaces/SaveModel) - Save sorting network to file
+    + /save_gesture_network (franka_hri_interfaces/SaveModel) - Save gesture network to file
+    + /save_complex_gesture_network (franka_hri_interfaces/SaveModel) - Save complex gesture network to file
+    + /correct_sorting (franka_hri_interfaces/CorrectionService) - Apply corrections to sorting network
+    + /correct_gesture (franka_hri_interfaces/CorrectionService) - Apply corrections to gesture network
+    + /correct_complex_gesture (franka_hri_interfaces/CorrectionService) - Apply corrections to complex gesture network
+    + /collect_norm_values (std_srvs/Trigger) - Collect normalization values for sensor data
+
+PARAMETERS:
+    + buffer_size (int) - Size of prediction buffer for sorting network
+    + buffer_size_gest (int) - Size of prediction buffer for gesture networks
+    + sequence_length (int) - Length of sequence for gesture recognition
+    + sorting_model_path (string) - Path to sorting network model file
+    + gesture_model_path (string) - Path to gesture network model file
+    + complex_gesture_model_path (string) - Path to complex gesture network model file
+    + save_directory (string) - Directory for saving network models
+    + log_directory (string) - Directory for saving network logs
+    + save_training_data (bool) - Whether to save training data
+    + training_data_dir (string) - Directory for saving training data
+    + norm_values_path (string) - Path to normalization values file
+"""
+
+
 import rclpy
 from rclpy.node import Node
 from std_srvs.srv import Trigger
@@ -160,8 +203,6 @@ class NetworkLogger:
                 prediction = np.array([float(x) for x in prediction_str])
             else:
                 prediction = float(last_entry[1])
-                
-            confidence = float(last_entry[2])
             
             # Update true label with the new label
             last_entry[3] = str(new_label)
@@ -1404,7 +1445,7 @@ class NetworkNode(Node):
 
         except Exception as e:
             self.get_logger().error(f'Error processing modality 51 data: {str(e)}')
-            
+
 
 def main(args=None):
     """Main function to initialize and run the node."""

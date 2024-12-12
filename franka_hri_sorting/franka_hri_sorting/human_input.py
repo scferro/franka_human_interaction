@@ -1,3 +1,27 @@
+"""
+GUI node for human input and corrections during robot learning.
+Provides a graphical interface for binary and categorical decisions,
+network corrections, and model saving functionality.
+
+PUBLISHERS:
+    + human_sorting (std_msgs/Int8) - Human decisions for sorting and classification
+
+SERVICE CLIENTS:
+    + save_sorting_network (franka_hri_interfaces/SaveModel) - Save sorting neural network model
+    + save_gesture_network (franka_hri_interfaces/SaveModel) - Save gesture neural network model
+    + save_complex_gesture_network (franka_hri_interfaces/SaveModel) - Save complex gesture neural network model
+    + correct_sorting (franka_hri_interfaces/CorrectionService) - Correct sorting network predictions
+    + correct_gesture (franka_hri_interfaces/CorrectionService) - Correct gesture network predictions
+    + correct_complex_gesture (franka_hri_interfaces/CorrectionService) - Correct complex gesture network predictions
+
+GUI COMPONENTS:
+    + Binary Decision Panel - Buttons for Yes/No decisions
+    + Category Decision Panel - Buttons for category selection (0-3)
+    + Correction Panel - Interface for correcting network predictions
+    + Save Panel - Controls for saving network models
+"""
+
+
 import rclpy
 from rclpy.node import Node
 import tkinter as tk

@@ -11,13 +11,6 @@ def generate_launch_description():
         description='Control loop rate in Hz'
     )
 
-    # Training mode argument
-    training_mode_arg = DeclareLaunchArgument(
-        'training_mode',
-        default_value='sorting_only',
-        description='Training mode: "sorting_only", "gestures_only", or "both"'
-    )
-
     # Define manipulate blocks node
     manipulate_blocks_node = Node(
         package='franka_control',
