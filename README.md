@@ -155,7 +155,7 @@ For more information on this project, please see the repo and project portfolio 
 
 Additionally, a sample of the data collected in the project can be found at the link below:
 
-[Data - Google Drive]([https://scferro.github.io/projects/05-ml-robot-sorting](https://drive.google.com/drive/folders/1R9Wt2iKjPnFkbv4xvzDKr16SuFiGmk7a?usp=sharing))
+[Data - Google Drive](https://drive.google.com/drive/folders/1R9Wt2iKjPnFkbv4xvzDKr16SuFiGmk7a?usp=sharing))
 
 ## License
 
