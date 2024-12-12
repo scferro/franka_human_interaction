@@ -1,4 +1,4 @@
-# Franka Human Interaction
+# franka_human_interaction
 
 Author - Stephen Ferro (scferro, stephencferro@gmail.com)
 
